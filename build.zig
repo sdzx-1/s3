@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const zap = b.dependency("zap", .{
         .target = target,
         .optimize = optimize,
-        .openssl = false, // set to true to enable TLS support
+        .openssl = true, // set to true to enable TLS support
     });
 
     const mod = b.addModule("s3", .{
