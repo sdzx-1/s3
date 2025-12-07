@@ -2,7 +2,7 @@ const std = @import("std");
 const zap = @import("zap");
 const sqlite = @import("sqlite");
 const signer = @import("auth/signer.zig");
-const time = @import("auth//time.zig");
+const time = @import("auth/time.zig");
 
 fn on_request(r: zap.Request) !void {
 
@@ -44,12 +44,25 @@ fn on_request(r: zap.Request) !void {
     defer headers.deinit();
     // SignedHeaders=host;x-amz-content-sha256;x-amz-date,
 
+    // content-encoding;
+    try headers.put("content-encoding", r.getHeader("content-encoding").?);
+    // host;
     try headers.put("host", r.getHeader("host").?);
+    // x-amz-content-sha256;
     try headers.put("x-amz-content-sha256", r.getHeader("x-amz-content-sha256").?);
+    // x-amz-date;
     try headers.put("x-amz-date", r.getHeader("x-amz-date").?);
+    // x-amz-decoded-content-length;
+    try headers.put("x-amz-decoded-content-length", r.getHeader("x-amz-decoded-content-length").?);
+    // x-amz-sdk-checksum-algorithm;
+    try headers.put("x-amz-sdk-checksum-algorithm", r.getHeader("x-amz-sdk-checksum-algorithm").?);
+    // x-amz-trailer
+    try headers.put("x-amz-trailer", r.getHeader("x-amz-trailer").?);
 
     // const req_time = r.getHeader("x-amz-date").?;
     // const t = time.UtcDateTime.init(timestamp_secs: i64)
+    // r.parametersToOwnedList(a: Allocator)
+
     const params = signer.SigningParams{
         .method = r.method.?,
         .path = r.path.?,
@@ -104,4 +117,36 @@ pub fn main() !void {
         .threads = 2,
         .workers = 2,
     });
+}
+
+pub fn aws_uri_encode(gpa: std.mem.Allocator, is_obj_key: bool, origin: []const u8) ![]const u8 {
+    var gpa_writer = try std.Io.Writer.Allocating.initCapacity(gpa, origin.len);
+    defer gpa_writer.deinit();
+    const writer = &gpa_writer.writer;
+
+    for (origin) |v| {
+        switch (v) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => {
+                try writer.writeByte(v);
+            },
+            '/' => {
+                if (is_obj_key) {
+                    try writer.writeByte(v);
+                } else {
+                    try writer.print("%{X}", .{v});
+                }
+            },
+            else => try writer.print("%{X}", .{v}),
+        }
+    }
+    return try gpa_writer.toOwnedSlice();
+}
+
+test aws_uri_encode {
+    const allocator = std.testing.allocator;
+    const origin = "/amzn-s3-demo-bucket/myphoto.jpg";
+
+    const res = try aws_uri_encode(allocator, false, origin);
+    defer allocator.free(res);
+    std.debug.print("res: {s}\n", .{res});
 }
