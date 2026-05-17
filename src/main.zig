@@ -12,10 +12,17 @@ const Data = troupe.Data;
 const s3 = @import("s3");
 
 pub fn main(init: std.process.Init) !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(1) });
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(10) });
     defer rt.deinit();
     const io = rt.io();
     const gpa = init.gpa;
+
+    var graph: troupe.Graph = try .initWithFsm(gpa, Ping);
+    const ff: Io.File = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
+    var ff_writer = ff.writer(io, &.{});
+    const writer = &ff_writer.interface;
+
+    try graph.generateDot(writer);
 
     const buffer = try gpa.alloc(MsgWrapper, 500);
     var msg_channel: MsgChannel = .init(buffer);
@@ -25,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     var group: Io.Group = .init;
 
     const curr_id = Runner.idFromState(Ping);
-    for (0..10) |_| {
+    for (0..10000) |_| {
         const ctx = try gpa.create(ClientContext);
         ctx.io = io;
         ctx.wait_msg.re = .init;
@@ -300,8 +307,8 @@ pub const Pong = union(enum) {
     pub const info = pingpogn_info("Pong", .server, &.{.client});
 
     pub fn process(ctx: *ServerContext) @This() {
-        std.debug.print("counter: {d}\n", .{ctx.global_counter});
-        if (ctx.global_counter > 1_000) {
+        // std.debug.print("counter: {d}\n", .{ctx.global_counter});
+        if (ctx.global_counter > 1_000_000) {
             return .finish;
         } else {
             ctx.global_counter += 1;
