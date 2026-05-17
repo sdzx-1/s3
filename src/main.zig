@@ -20,29 +20,6 @@ pub fn main(init: std.process.Init) !void {
     _ = io;
 }
 
-fn handleClient(io: Io, stream: Io.net.Stream) !void {
-    _ = io;
-    _ = stream;
-}
-
-const S3Context = struct {
-    allocator: Allocator,
-    data_dir: []const u8,
-    access_control_map: std.StringHashMap(acl.Credential),
-
-    fn bucketPath(self: *const S3Context, allocator: Allocator, bucket: []const u8) ![]const u8 {
-        return std.fs.path.join(allocator, &[_][]const u8{ self.data_dir, bucket });
-    }
-
-    fn objectPath(self: *const S3Context, allocator: Allocator, bucket: []const u8, key: []const u8) ![]const u8 {
-        return std.fs.path.join(allocator, &[_][]const u8{ self.data_dir, bucket, key });
-    }
-
-    pub fn deinit(self: *S3Context) void {
-        self.access_control_map.deinit();
-    }
-};
-
 const Msg = struct {
     _next: ?*Msg = null,
     fibe_id: usize,
