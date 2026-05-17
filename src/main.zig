@@ -1,11 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const tracy = @import("tracy.zig");
-const trace = tracy.trace;
 const zio = @import("zio");
-const acl = @import("acl.zig");
-const ConcurrentStack = @import("ConcurrentStack.zig");
 const troupe = @import("troupe");
 const Data = troupe.Data;
 
@@ -32,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var group: Io.Group = .init;
 
     const curr_id = Runner.idFromState(Ping);
-    for (0..10000) |_| {
+    for (0..10) |_| {
         const ctx = try gpa.create(ClientContext);
         ctx.io = io;
         ctx.wait_msg.re = .init;
@@ -291,6 +287,7 @@ pub const Ping = union(enum) {
 
     pub fn process(ctx: *ClientContext) @This() {
         ctx.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+        std.debug.print("{*}\n", .{&ctx.wait_msg});
         return .req_add;
     }
 
@@ -307,8 +304,8 @@ pub const Pong = union(enum) {
     pub const info = pingpogn_info("Pong", .server, &.{.client});
 
     pub fn process(ctx: *ServerContext) @This() {
-        // std.debug.print("counter: {d}\n", .{ctx.global_counter});
-        if (ctx.global_counter > 1_000_000) {
+        std.debug.print("counter: {d}\n", .{ctx.global_counter});
+        if (ctx.global_counter > 100) {
             return .finish;
         } else {
             ctx.global_counter += 1;

@@ -1,0 +1,17 @@
+digraph fsm_state_graph {
+  subgraph cluster_transitions {
+    label = "State Transitions";
+    subgraph cluster_fsm_0 {
+      label = "pingpong: { .client, .server }";
+      0[shape=rect,  label="[0] Ping .client -> { .server }", color = "red"];
+      1[shape=rect,  label="[1] Pong .server -> { .client }", color = "green"];
+    }
+    subgraph cluster_fsm_1 {
+      label = "troupe_exit";
+      2[shape=rect,  label="[2] Exit", color = "blue"];
+    }
+    0 -> 1 [label = "req_add", color = "red", fontcolor = "red"];
+    1 -> 0 [label = "ok", color = "green", fontcolor = "green"];
+    1 -> 2 [label = "finish", color = "green", fontcolor = "green"];
+  }
+}
