@@ -3,3 +3,5 @@ zig-out/
 *.o
 zig-pkg/
 build/
+*.dot
+*.svg

@@ -5,19 +5,22 @@ const tracy = @import("tracy.zig");
 const trace = tracy.trace;
 const zio = @import("zio");
 const acl = @import("acl.zig");
-
-const s3 = @import("s3");
+const troupe = @import("troupe");
+const s3 = @import("s3.zig");
+const run = @import("run.zig");
+const Runner = s3.Runner;
+const EnterState = s3.Start;
 
 pub fn main(init: std.process.Init) !void {
     const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(1) });
     defer rt.deinit();
     const io = rt.io();
     const gpa = init.gpa;
-    // const arena = init.arena.allocator();
 
     // Parse CLI arguments
     var port: u16 = 9000;
     var data_dir: []const u8 = "data";
+    var tmp_dir: []const u8 = "tmp";
     var raw_acl_list: []const u8 = "admin:minioadmin:minioadmin";
     var show_help: bool = false;
 
@@ -26,6 +29,8 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--data-dir=")) {
             data_dir = arg[11..];
+        } else if (std.mem.startsWith(u8, arg, "--tmp-dir=")) {
+            tmp_dir = arg[10..];
         } else if (std.mem.startsWith(u8, arg, "--acl=")) {
             raw_acl_list = arg[6..];
         } else if (std.mem.startsWith(u8, arg, "--port=")) {
@@ -73,6 +78,11 @@ pub fn main(init: std.process.Init) !void {
         else => return err,
     };
 
+    Io.Dir.cwd().createDir(io, tmp_dir, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
     // Keys reference slices in raw_acl_list (argv or build_options string), both of
     // which outlive the process — safe to store as map keys without copying.
     var access_control_map = std.StringHashMap(acl.Credential).init(gpa);
@@ -87,13 +97,6 @@ pub fn main(init: std.process.Init) !void {
         gop.value_ptr.* = credential;
     }
 
-    var ctx = S3Context{
-        .allocator = gpa,
-        .data_dir = data_dir,
-        .access_control_map = access_control_map,
-    };
-    defer ctx.deinit();
-
     const address = Io.net.IpAddress.parseIp4("0.0.0.0", port) catch |err| {
         return err;
     };
@@ -102,35 +105,43 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("S3 server listening on http://0.0.0.0:{d}", .{port});
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
+    //
+    // write graph
+    var graph: troupe.Graph = try .initWithFsm(gpa, EnterState);
+    const ff: Io.File = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
+    var ff_writer = ff.writer(io, &.{});
+    const writer = &ff_writer.interface;
+    try graph.generateDot(writer);
+
+    //
+    const buffer = try gpa.alloc(s3.MsgWrapper, 500);
+    var msg_channel: s3.MsgChannel = .init(buffer);
+
+    var server_future = try io.concurrent(run.server, .{
+        gpa,
+        access_control_map,
+        &msg_channel,
+    });
+    defer server_future.cancel(io);
 
     while (true) {
         const stream = try server.accept(io);
         errdefer stream.close(io);
-        try group.concurrent(io, handleClient, .{ io, stream });
+
+        const ctx = try gpa.create(s3.ClientContext);
+        ctx.wait_msg.re = .init;
+        ctx.data_dir = data_dir;
+        ctx.tmp_dir = tmp_dir;
+        ctx.io = io;
+        ctx.stream = stream;
+        ctx.stream_reader = stream.reader(io, &.{});
+        ctx.stream_writer = stream.writer(io, &.{});
+        ctx.arena_allocaotr = .init(gpa);
+        //TODO: free ctx
+        _ = try io.concurrent(run.client, .{
+            Runner.idFromState(EnterState),
+            &msg_channel,
+            ctx,
+        });
     }
 }
-
-fn handleClient(io: Io, stream: Io.net.Stream) !void {
-    _ = io;
-    _ = stream;
-}
-
-const S3Context = struct {
-    allocator: Allocator,
-    data_dir: []const u8,
-    access_control_map: std.StringHashMap(acl.Credential),
-
-    fn bucketPath(self: *const S3Context, allocator: Allocator, bucket: []const u8) ![]const u8 {
-        return std.fs.path.join(allocator, &[_][]const u8{ self.data_dir, bucket });
-    }
-
-    fn objectPath(self: *const S3Context, allocator: Allocator, bucket: []const u8, key: []const u8) ![]const u8 {
-        return std.fs.path.join(allocator, &[_][]const u8{ self.data_dir, bucket, key });
-    }
-
-    pub fn deinit(self: *S3Context) void {
-        self.access_control_map.deinit();
-    }
-};
