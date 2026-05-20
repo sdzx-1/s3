@@ -127,7 +127,9 @@ pub fn client(
 ) void {
     runClient(curr_id, msg_channel, ctx);
     if (ctx.is_res) {
-        ctx.res.write(ctx.stream, &ctx.stream_writer.interface) catch unreachable;
+        ctx.res.write(ctx.stream, &ctx.stream_writer.interface) catch |err| {
+            std.log.err("Http response write failed: {t}", .{err});
+        };
     }
     ctx.arena_allocaotr.deinit();
     ctx.stream.close(ctx.io);

@@ -128,7 +128,23 @@ pub const Errors = enum {
     parse_requeset_failed,
     stream_write_failed,
     invalid_authorization,
-    //
+    //Route
+    invalid_bucket_name,
+    invalid_key,
+    handleListBuckets,
+    handleListObjects,
+    handleGetObject,
+    handleCreateBucket,
+    handleUploadPart,
+    handlePutObject,
+    handleDeleteBucket,
+    handleAbortMultipart,
+    handleDeleteObject,
+    handleHeadBucket,
+    handleHeadObject,
+    handleDeleteObjects,
+    handleInitiateMultipart,
+    handleCompleteMultipart,
 };
 
 pub const Start = union(enum) {
@@ -260,8 +276,7 @@ pub const SigV4 = union(enum) {
 
 pub const Route = union(enum) {
     ok: Data(void, troupe.Exit),
-    invalid_bucket_name: Data(void, troupe.Exit),
-    invalid_key: Data(void, troupe.Exit),
+    failed: Data(Errors, troupe.Exit),
 
     pub const info = s3_info("Route", .client, &.{.server});
 
@@ -275,52 +290,94 @@ pub const Route = union(enum) {
 
         if (bucket.len > 0 and !zs3.isValidBucketName(bucket)) {
             zs3.sendError(&ctx.res, 400, "InvalidBucketName", "Bucket name is invalid");
-            return .invalid_bucket_name;
+            return .{ .failed = .{ .data = .invalid_bucket_name } };
         }
         if (key.len > 0 and !zs3.isValidKey(key)) {
             zs3.sendError(&ctx.res, 400, "InvalidKey", "Object key is invalid");
-            return .invalid_key;
+            return .{ .failed = .{ .data = .invalid_key } };
         }
         const arena = ctx.arena_allocaotr.allocator();
 
         // Standard S3 routing (standalone mode or bucket operations)
         if (std.mem.eql(u8, ctx.req.method, "GET")) {
             if (bucket.len == 0) {
-                zs3.handleListBuckets(ctx.io, ctx.data_dir, arena, &ctx.res) catch unreachable;
+                zs3.handleListBuckets(ctx.io, ctx.data_dir, arena, &ctx.res) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleListBuckets");
+                    return .{ .failed = .{ .data = .handleListBuckets } };
+                };
             } else if (key.len == 0) {
-                zs3.handleListObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch unreachable;
+                zs3.handleListObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleListObjects");
+                    return .{ .failed = .{ .data = .handleListObjects } };
+                };
             } else {
-                zs3.handleGetObject(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleGetObject(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleGetObject");
+                    return .{ .failed = .{ .data = .handleGetObject } };
+                };
             }
         } else if (std.mem.eql(u8, ctx.req.method, "PUT")) {
             if (key.len == 0) {
-                zs3.handleCreateBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch unreachable;
+                zs3.handleCreateBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleCreateBucket");
+                    return .{ .failed = .{ .data = .handleCreateBucket } };
+                };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
-                zs3.handleUploadPart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleUploadPart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleUploadPart");
+                    return .{ .failed = .{ .data = .handleUploadPart } };
+                };
             } else {
-                zs3.handlePutObject(ctx.io, ctx.data_dir, ctx.id, ctx.tmp_dir, arena, &ctx.req, &ctx.res, bucket, key) catch unreachable;
+                zs3.handlePutObject(ctx.io, ctx.data_dir, ctx.id, ctx.tmp_dir, arena, &ctx.req, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handlePutObject");
+                    return .{ .failed = .{ .data = .handlePutObject } };
+                };
             }
         } else if (std.mem.eql(u8, ctx.req.method, "DELETE")) {
             if (key.len == 0) {
-                zs3.handleDeleteBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch unreachable;
+                zs3.handleDeleteBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteBucket");
+                    return .{ .failed = .{ .data = .handleDeleteBucket } };
+                };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
-                zs3.handleAbortMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res) catch unreachable;
+                zs3.handleAbortMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleAbortMultipart");
+                    return .{ .failed = .{ .data = .handleAbortMultipart } };
+                };
             } else {
-                zs3.handleDeleteObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleDeleteObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteObject");
+                    return .{ .failed = .{ .data = .handleDeleteObject } };
+                };
             }
         } else if (std.mem.eql(u8, ctx.req.method, "HEAD")) {
             if (key.len == 0) {
-                zs3.handleHeadBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch unreachable;
+                zs3.handleHeadBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleHeadBucket");
+                    return .{ .failed = .{ .data = .handleHeadBucket } };
+                };
             } else {
-                zs3.handleHeadObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleHeadObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleHeadObject");
+                    return .{ .failed = .{ .data = .handleHeadObject } };
+                };
             }
         } else if (std.mem.eql(u8, ctx.req.method, "POST")) {
             if (zs3.hasQuery(ctx.req.query, "delete")) {
-                zs3.handleDeleteObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch unreachable;
+                zs3.handleDeleteObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteObjects");
+                    return .{ .failed = .{ .data = .handleDeleteObjects } };
+                };
             } else if (zs3.hasQuery(ctx.req.query, "uploads")) {
-                zs3.handleInitiateMultipart(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleInitiateMultipart(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleInitiateMultipart");
+                    return .{ .failed = .{ .data = .handleInitiateMultipart } };
+                };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
-                zs3.handleCompleteMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch unreachable;
+                zs3.handleCompleteMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch {
+                    zs3.sendError(&ctx.res, 500, "InternalError", "handleCompleteMultipart");
+                    return .{ .failed = .{ .data = .handleCompleteMultipart } };
+                };
             } else {
                 zs3.sendError(&ctx.res, 400, "InvalidRequest", "Unknown POST operation");
             }
