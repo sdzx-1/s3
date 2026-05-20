@@ -12,7 +12,7 @@ const Runner = s3.Runner;
 const EnterState = s3.Start;
 
 pub fn main(init: std.process.Init) !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(1) });
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(4) });
     defer rt.deinit();
     const io = rt.io();
     const gpa = init.gpa;
@@ -106,24 +106,47 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("S3 server listening on http://0.0.0.0:{d}", .{port});
 
     //
-    // write graph
-    var graph: troupe.Graph = try .initWithFsm(gpa, EnterState);
-    const ff: Io.File = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
-    var ff_writer = ff.writer(io, &.{});
-    const writer = &ff_writer.interface;
-    try graph.generateDot(writer);
-
-    //
-    const buffer = try gpa.alloc(s3.MsgWrapper, 500);
+    const buffer = try gpa.alloc(s3.MsgWrapper, 1000);
     var msg_channel: s3.MsgChannel = .init(buffer);
 
-    var server_future = try io.concurrent(run.server, .{
+    const buffer1 = try gpa.alloc(*s3.ClientContext, 1000);
+    var clean_channel: run.CleanChannel = .init(buffer1);
+
+    var server_thid = try std.Thread.spawn(.{}, accept_loop, .{
+        io,
+        gpa,
+        &server,
+        data_dir,
+        tmp_dir,
+        &msg_channel,
+        &clean_channel,
+    });
+    defer server_thid.join();
+
+    var s3server_thid = try std.Thread.spawn(.{}, run.server, .{
         gpa,
         access_control_map,
         &msg_channel,
     });
-    defer server_future.cancel(io);
+    defer s3server_thid.join();
 
+    //free ClientContext memory
+    while (true) {
+        const client = clean_channel.receive() catch return;
+        client.future.await(io);
+        gpa.destroy(client);
+    }
+}
+
+fn accept_loop(
+    io: Io,
+    gpa: Allocator,
+    server: *Io.net.Server,
+    data_dir: []const u8,
+    tmp_dir: []const u8,
+    msg_channel: *s3.MsgChannel,
+    clean_channel: *run.CleanChannel,
+) !void {
     while (true) {
         const stream = try server.accept(io);
         errdefer stream.close(io);
@@ -138,10 +161,12 @@ pub fn main(init: std.process.Init) !void {
         ctx.stream_writer = stream.writer(io, &.{});
         ctx.arena_allocaotr = .init(gpa);
         //TODO: free ctx
-        _ = try io.concurrent(run.client, .{
+        const client_future = try io.concurrent(run.client, .{
             Runner.idFromState(EnterState),
-            &msg_channel,
+            msg_channel,
             ctx,
+            clean_channel,
         });
+        ctx.future = client_future;
     }
 }

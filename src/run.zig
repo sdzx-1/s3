@@ -117,16 +117,21 @@ pub fn runServer(
     }
 }
 
+pub const CleanChannel = zio.Channel(*s3.ClientContext);
+
 pub fn client(
     curr_id: Runner.StateId,
     msg_channel: *MsgChannel,
     ctx: *ClientContext,
+    clean_channel: *CleanChannel,
 ) void {
     runClient(curr_id, msg_channel, ctx);
     if (ctx.is_res) {
         ctx.res.write(ctx.stream, &ctx.stream_writer.interface) catch unreachable;
     }
     ctx.arena_allocaotr.deinit();
+    ctx.stream.close(ctx.io);
+    clean_channel.send(ctx) catch unreachable;
 }
 
 pub fn runClient(
@@ -135,7 +140,6 @@ pub fn runClient(
     ctx: *ClientContext,
 ) void {
     @setEvalBranchQuota(10_000_000);
-
     sw: switch (curr_id) {
         inline else => |state_id| {
             const Curr_State = Runner.StateFromId(state_id);

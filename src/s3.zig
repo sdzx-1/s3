@@ -67,6 +67,7 @@ pub const ServerContext = struct {
 };
 
 pub const ClientContext = struct {
+    future: Io.Future(void),
     wait_msg: WaitMsg,
     data_dir: []const u8,
     tmp_dir: []const u8,
