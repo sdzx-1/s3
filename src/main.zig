@@ -12,10 +12,6 @@ const Runner = s3.Runner;
 const EnterState = s3.Start;
 
 pub fn main(init: std.process.Init) !void {
-    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(4) });
-    defer rt.deinit();
-    const io = rt.io();
-    const gpa = init.gpa;
 
     // Parse CLI arguments
     var port: u16 = 9000;
@@ -23,6 +19,7 @@ pub fn main(init: std.process.Init) !void {
     var tmp_dir: []const u8 = "tmp";
     var raw_acl_list: []const u8 = "admin:minioadmin:minioadmin";
     var show_help: bool = false;
+    var executor_threads: u6 = 4;
 
     var args = init.minimal.args.iterate();
     _ = args.skip(); // Skip program name
@@ -31,14 +28,27 @@ pub fn main(init: std.process.Init) !void {
             data_dir = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--tmp-dir=")) {
             tmp_dir = arg[10..];
+        } else if (std.mem.startsWith(u8, arg, "--zio-threads=")) {
+            executor_threads = std.fmt.parseInt(u6, arg[14..], 10) catch |err| {
+                std.log.err("Invalid threads: {t}", .{err});
+                return;
+            };
         } else if (std.mem.startsWith(u8, arg, "--acl=")) {
             raw_acl_list = arg[6..];
         } else if (std.mem.startsWith(u8, arg, "--port=")) {
-            port = std.fmt.parseInt(u16, arg[7..], 10) catch 9000;
+            port = std.fmt.parseInt(u16, arg[7..], 10) catch |err| {
+                std.log.err("Invalid port: {t}", .{err});
+                return;
+            };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             show_help = true;
         }
     }
+
+    const rt = try zio.Runtime.init(std.heap.smp_allocator, .{ .executors = .exact(executor_threads) });
+    defer rt.deinit();
+    const io = rt.io();
+    const gpa = init.gpa;
 
     if (show_help) {
         std.debug.print(
@@ -50,8 +60,16 @@ pub fn main(init: std.process.Init) !void {
             \\  --port={d}
             \\      HTTP port to listen on
             \\
+            \\  --zio-threads={d}
+            \\      Number of zio executor threads to run (including main)
+            \\      0 = auto-detect based on CPU count
+            \\      1 = single-threaded, no worker threads
+            \\
             \\  --data-dir={s}
             \\      The directory to store bucket data under
+            \\
+            \\  --tmp-dir={s}
+            \\      The directory to store tmp object data
             \\
             \\  --acl={s}
             \\      The credentials for access
@@ -59,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
             \\  --help, -h
             \\      Show this help
             \\
-        , .{ port, data_dir, raw_acl_list });
+        , .{ port, executor_threads, data_dir, tmp_dir, raw_acl_list });
         return;
     }
 
@@ -130,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer s3server_thid.join();
 
-    //free ClientContext memory
+    // await client.future, free ClientContext memory
     while (true) {
         const client = clean_channel.receive() catch return;
         client.future.await(io);
