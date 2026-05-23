@@ -127,13 +127,18 @@ pub fn client(
 ) void {
     runClient(curr_id, msg_channel, ctx);
     if (ctx.is_res) {
-        ctx.res.write(ctx.stream, &ctx.stream_writer.interface) catch |err| {
+        ctx.res.write(ctx.io, ctx.writer, ctx.socket_fd) catch |err| {
             std.log.err("Http response write failed: {t}", .{err});
+        };
+        ctx.writer.flush() catch |err| {
+            std.log.err("client flush error: {t}", .{err});
         };
     }
     ctx.arena_allocaotr.deinit();
     ctx.stream.close(ctx.io);
-    clean_channel.send(ctx) catch unreachable;
+    clean_channel.send(ctx) catch |err| {
+        std.log.err("client clean error: {t}", .{err});
+    };
 }
 
 pub fn runClient(

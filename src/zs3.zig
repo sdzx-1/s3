@@ -1,11 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
-const posix = std.posix;
+const http = std.http;
 const Allocator = std.mem.Allocator;
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const acl = @import("acl.zig");
 const tracy = @import("tracy.zig");
 const trace = tracy.trace;
+const zio = @import("zio");
 
 pub const MAX_HEADER_SIZE = 8 * 1024;
 pub const MAX_BODY_SIZE = 5 * 1024 * 1024 * 1024;
@@ -13,6 +15,10 @@ pub const MAX_KEY_LENGTH = 1024;
 pub const MAX_BUCKET_LENGTH = 63;
 pub const MAX_CONNECTIONS = 1024;
 pub const ERROR_403 = "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\nConnection: keep-alive\r\n\r\nDenied";
+
+/// Suffix appended to object files to store metadata sidecar.
+/// Objects with keys ending in this suffix are rejected at the route level.
+pub const META_SUFFIX = ".__s3_meta__";
 
 pub fn findHeaderEnd(data: []const u8) ?usize {
     const tracy_fun = trace(@src());
@@ -98,7 +104,7 @@ pub const Request = struct {
     path: []const u8,
     query: []const u8,
     headers: std.StringHashMap([]const u8),
-    body: []const u8,
+    body: *Io.Reader,
 
     pub fn header(self: *const Request, name: []const u8) ?[]const u8 {
         var lower_buf: [128]u8 = undefined;
@@ -110,6 +116,36 @@ pub const Request = struct {
         self.headers.deinit();
     }
 };
+
+/// Runs sendfile(2) in a thread-pool worker via blockInPlace.
+/// Handles EAGAIN on non-blocking sockets by blocking-poll inside the worker thread.
+fn sendFileLoop(out_fd: std.posix.fd_t, in_fd: std.posix.fd_t, offset: *i64, count: usize) bool {
+    var remaining = count;
+    while (remaining > 0) {
+        const sent = std.os.linux.sendfile(out_fd, in_fd, offset, remaining);
+        if (sent > remaining) {
+            // sendfile returned an error value (negative errno as usize).
+            // EAGAIN means the socket send buffer is full — poll until writable.
+            const err = @as(i64, @bitCast(@as(u64, sent)));
+            if (err < 0) {
+                const errno_val: u16 = @intCast(-err);
+                if (errno_val == @intFromEnum(std.posix.E.AGAIN)) {
+                    var pfds: [1]std.posix.pollfd = .{.{
+                        .fd = out_fd,
+                        .events = std.posix.POLL.OUT,
+                        .revents = 0,
+                    }};
+                    _ = std.posix.poll(&pfds, -1) catch return false; // poll failed
+                    continue;
+                }
+            }
+            return false; // unrecoverable error
+        }
+        if (sent == 0) return false; // unexpected EOF
+        remaining -= sent;
+    }
+    return true; // all bytes sent
+}
 
 pub const Response = struct {
     status: u16 = 200,
@@ -131,11 +167,12 @@ pub const Response = struct {
 
     pub fn deinit(self: *Response) void {
         self.headers.deinit(self.allocator);
-        if (self.send_file) |f| f.close();
+        // File is closed in write() after streaming
+        self.send_file = null;
     }
 
     pub fn setHeader(self: *Response, name: []const u8, value: []const u8) void {
-        self.headers.append(self.allocator, .{ .name = name, .value = value }) catch {};
+        self.headers.append(self.allocator, .{ .name = name, .value = value }) catch unreachable;
     }
 
     pub fn ok(self: *Response) void {
@@ -159,14 +196,11 @@ pub const Response = struct {
         self.send_file_offset = offset;
     }
 
-    pub fn write(self: *Response, stream: Io.net.Stream, stream_writer: *Io.Writer) !void {
+    pub fn write(self: *Response, io: Io, stream_writer: *Io.Writer, socket_fd: ?std.posix.fd_t) !void {
         const tracy_fun = trace(@src());
         defer tracy_fun.end();
 
-        var buf: [8192]u8 = undefined;
-        var w: Io.Writer = .fixed(&buf);
-
-        try w.print("HTTP/1.1 {d} {s}\r\n", .{ self.status, self.status_text });
+        try stream_writer.print("HTTP/1.1 {d} {s}\r\n", .{ self.status, self.status_text });
 
         // Check if Content-Length was already set via setHeader
         var has_content_length = false;
@@ -180,27 +214,54 @@ pub const Response = struct {
         // Only add auto Content-Length if not already set
         if (!has_content_length) {
             const content_len = if (self.send_file != null) self.send_file_size else self.body.len;
-            try w.print("Content-Length: {d}\r\n", .{content_len});
+            try stream_writer.print("Content-Length: {d}\r\n", .{content_len});
         }
-        try w.writeAll("Connection: close\r\n");
+        try stream_writer.writeAll("Connection: close\r\n");
 
         for (self.headers.items) |h| {
-            try w.print("{s}: {s}\r\n", .{ h.name, h.value });
+            try stream_writer.print("{s}: {s}\r\n", .{ h.name, h.value });
         }
-        try w.writeAll("\r\n");
-
-        try stream_writer.writeAll(w.buffered());
+        try stream_writer.writeAll("\r\n");
 
         if (self.send_file) |file| {
-            // Use sendfile for zero-copy transfer
-            var offset: i64 = @intCast(self.send_file_offset);
-            var remaining: usize = self.send_file_size;
-            while (remaining > 0) {
-                //TODO: use stream_writer.sendfile
-                const rc = std.os.linux.sendfile(stream.socket.handle, file.handle, &offset, remaining);
-                const sent = @as(isize, @bitCast(rc));
-                if (sent <= 0) break;
-                remaining -= @intCast(sent);
+            defer file.close(io);
+            if (self.send_file_size > 0) {
+                const SEND_THRESHOLD: usize = 64 * 1024;
+                if (builtin.os.tag == .linux and socket_fd != null and self.send_file_size > SEND_THRESHOLD) {
+                    // Use sendfile(2) via thread pool for large files — zero-copy, single syscall
+                    const file_fd: std.posix.fd_t = @intCast(file.handle);
+                    const sock_fd = socket_fd.?;
+                    var offset: i64 = @intCast(self.send_file_offset);
+                    // Ensure headers are flushed before sendfile touches the socket
+                    stream_writer.flush() catch |err| {
+                        std.log.err("stream_writer error: {t}\n", .{err});
+                    };
+                    const send_ok = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
+                    if (!send_ok) {
+                        std.log.err("sendfile failed for fd={d} offset={d} size={d}\n", .{ file_fd, self.send_file_offset, self.send_file_size });
+                    }
+                } else {
+                    // Read+write fallback for small files or non-Linux
+                    var file_reader = Io.File.reader(file, io, &.{});
+                    file_reader.seekTo(self.send_file_offset) catch |err| {
+                        std.log.err("seekTo error: {t}", .{err});
+                    };
+                    var remaining: usize = self.send_file_size;
+                    var read_buf: [65536]u8 = undefined;
+                    while (remaining > 0) {
+                        const to_read = @min(remaining, read_buf.len);
+                        var iovecs: [1][]u8 = .{read_buf[0..to_read]};
+                        const n = file_reader.interface.readVec(&iovecs) catch break;
+                        if (n == 0) break;
+                        var written: usize = 0;
+                        while (written < n) {
+                            const n_written = try stream_writer.write(read_buf[written..n]);
+                            if (n_written == 0) return error.ConnectionResetByPeer;
+                            written += n_written;
+                        }
+                        remaining -= written;
+                    }
+                }
             }
         } else if (self.body.len > 0) {
             // Custom write loop to handle WouldBlock on non-blocking sockets
@@ -213,94 +274,6 @@ pub const Response = struct {
         }
     }
 };
-
-pub fn parseRequestFromBuf(allocator: Allocator, data: []const u8, reader: *Io.Reader, writer: *Io.Writer) !Request {
-    const tracy_fun = trace(@src());
-    defer tracy_fun.end();
-
-    const total_read = data.len;
-    const line_end = std.mem.indexOf(u8, data, "\r\n") orelse return error.InvalidRequest;
-    const request_line = data[0..line_end];
-
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method = parts.next() orelse return error.InvalidRequest;
-    const full_path = parts.next() orelse return error.InvalidRequest;
-    var path: []const u8 = full_path;
-    var query: []const u8 = "";
-    if (std.mem.indexOf(u8, full_path, "?")) |q_idx| {
-        path = full_path[0..q_idx];
-        query = full_path[q_idx + 1 ..];
-    }
-
-    var headers = std.StringHashMap([]const u8).init(allocator);
-    var header_section = data[line_end + 2 ..];
-    const header_end = std.mem.indexOf(u8, header_section, "\r\n\r\n") orelse header_section.len;
-    header_section = header_section[0..header_end];
-
-    var header_lines = std.mem.splitSequence(u8, header_section, "\r\n");
-    while (header_lines.next()) |line| {
-        if (line.len == 0) continue;
-        const colon = std.mem.indexOf(u8, line, ":") orelse continue;
-        var name_buf: [128]u8 = undefined;
-        const name = std.ascii.lowerString(&name_buf, std.mem.trim(u8, line[0..colon], " "));
-        const value = std.mem.trim(u8, line[colon + 1 ..], " ");
-        try headers.put(try allocator.dupe(u8, name), try allocator.dupe(u8, value));
-    }
-
-    var body: []const u8 = "";
-    if (headers.get("content-length")) |cl_str| {
-        const content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
-        if (content_length > MAX_BODY_SIZE) return error.PayloadTooLarge;
-        if (content_length > 0) {
-            // Handle Expect: 100-continue - send 100 Continue before reading body
-            if (headers.get("expect")) |expect| {
-                if (std.ascii.eqlIgnoreCase(expect, "100-continue")) {
-                    writer.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch {};
-                }
-            }
-
-            const body_start_idx = std.mem.indexOf(u8, data, "\r\n\r\n").? + 4;
-            // Ensure we don't underflow: already_read = max(0, total_read - body_start_idx)
-            const already_read = if (total_read > body_start_idx) total_read - body_start_idx else 0;
-            // Cap already_read to content_length to prevent overflow in memcpy
-            const bytes_to_copy = @min(already_read, content_length);
-
-            const body_buf = try allocator.alloc(u8, content_length);
-            if (bytes_to_copy > 0) {
-                @memcpy(body_buf[0..bytes_to_copy], data[body_start_idx .. body_start_idx + bytes_to_copy]);
-            }
-
-            var remaining = content_length - bytes_to_copy;
-            var offset = bytes_to_copy;
-            while (remaining > 0) {
-                var slices: [1][]u8 = .{body_buf[offset..]};
-                const n = reader.readVec(&slices) catch |err| {
-                    return err;
-                };
-                if (n == 0) break;
-                offset += n;
-                remaining -= n;
-            }
-            body = body_buf;
-
-            // Decode AWS chunked transfer encoding if present
-            if (headers.get("x-amz-content-sha256")) |sha| {
-                if (std.mem.eql(u8, sha, "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")) {
-                    const decoded = try decodeAwsChunked(allocator, body);
-                    body = decoded;
-                }
-            }
-        }
-    }
-
-    return Request{
-        .method = try allocator.dupe(u8, method),
-        .path = try allocator.dupe(u8, path),
-        .query = try allocator.dupe(u8, query),
-        .headers = headers,
-        .body = body,
-    };
-}
 
 /// Decode AWS chunked transfer encoding.
 /// Format: <hex-size>;chunk-signature=...\r\n<data>\r\n repeated, terminated by 0-size chunk.
@@ -780,6 +753,96 @@ const KeyInfo = struct {
     mtime: i64, // Unix timestamp in seconds
 };
 
+/// Persistent metadata stored in a sidecar file named `<key>.__s3_meta__`.
+pub const ObjectMetaData = struct {
+    content_type: []const u8,
+    content_encoding: []const u8,
+    etag: []const u8,
+    last_modified: i64,
+    size: u64,
+};
+
+/// Returns true if the key uses the reserved meta suffix and should be rejected.
+pub fn isReservedKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    if (std.mem.endsWith(u8, key, META_SUFFIX)) return true;
+    if (std.mem.endsWith(u8, key, META_SUFFIX ++ "/")) return true;
+    return false;
+}
+
+/// Deserialise an ObjectMetaData from a sidecar file.
+/// Returns null if the file doesn't exist or is malformed (graceful degradation).
+pub fn readObjectMeta(io: Io, allocator: Allocator, meta_path: []const u8) !?ObjectMetaData {
+    const file = Io.Dir.cwd().openFile(io, meta_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return null,
+    };
+    defer file.close(io);
+
+    var file_reader = file.reader(io, &.{});
+    const content = file_reader.interface.allocRemaining(allocator, .limited(4096)) catch return null;
+    defer allocator.free(content);
+
+    // Minimal JSON parser for our flat struct: {"ct":"..","ce":"..","e":"..","lm":123,"sz":123}
+    const obj = std.json.parseFromSliceLeaky(std.json.Value, allocator, content, .{}) catch return null;
+    const map = obj.object;
+    const ct = map.get("ct") orelse return null;
+    const ce = map.get("ce") orelse return null;
+    const et = map.get("e") orelse return null;
+    const lm = map.get("lm") orelse return null;
+    const sz = map.get("sz") orelse return null;
+
+    const lm_val = switch (lm) {
+        .integer => |v| @as(i64, v),
+        .float => |v| @as(i64, @intFromFloat(v)),
+        else => return null,
+    };
+    const sz_val = switch (sz) {
+        .integer => |v| @as(u64, @intCast(v)),
+        .float => |v| @as(u64, @intFromFloat(v)),
+        else => return null,
+    };
+    return ObjectMetaData{
+        .content_type = ct.string,
+        .content_encoding = ce.string,
+        .etag = et.string,
+        .last_modified = lm_val,
+        .size = sz_val,
+    };
+}
+
+/// Serialise and write an ObjectMetaData to a sidecar file.
+/// Writes to a temp path in the tmp_dir then renames for atomicity.
+pub fn writeObjectMeta(
+    io: Io,
+    allocator: Allocator,
+    meta_path: []const u8,
+    meta: ObjectMetaData,
+) !void {
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{meta_path});
+    defer allocator.free(tmp_path);
+
+    var file = try Io.Dir.cwd().createFile(io, tmp_path, .{});
+    defer file.close(io);
+
+    var file_writer = file.writer(io, &.{});
+    const w = &file_writer.interface;
+    try w.print("{{\"ct\":\"{s}\",\"ce\":\"{s}\",\"e\":\"{s}\",\"lm\":{d},\"sz\":{d}}}", .{
+        meta.content_type,
+        meta.content_encoding,
+        meta.etag,
+        meta.last_modified,
+        meta.size,
+    });
+    try w.flush();
+
+    // Atomic rename
+    Io.Dir.cwd().rename(tmp_path, Io.Dir.cwd(), meta_path, io) catch |err| {
+        _ = Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+        return err;
+    };
+}
+
 fn collectKeys(io: Io, allocator: Allocator, base_path: []const u8, current_prefix: []const u8, filter_prefix: []const u8, keys: *std.ArrayListUnmanaged(KeyInfo)) !void {
     const full_path = if (current_prefix.len > 0)
         try std.fs.path.join(allocator, &[_][]const u8{ base_path, current_prefix })
@@ -793,6 +856,9 @@ fn collectKeys(io: Io, allocator: Allocator, base_path: []const u8, current_pref
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         if (entry.name[0] == '.') continue;
+
+        // Skip metadata sidecar files — they are not user-visible objects
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, META_SUFFIX)) continue;
 
         const full_key = if (current_prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current_prefix, entry.name })
@@ -1056,6 +1122,19 @@ pub fn handleGetObject(
     const path = try objectPath(allocator, data_dir, bucket, effective_key);
     defer allocator.free(path);
 
+    // Read metadata sidecar — mandatory, object without metadata is invalid
+    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    defer allocator.free(meta_path);
+    const meta = readObjectMeta(io, allocator, meta_path) catch |err| switch (err) {
+        else => {
+            sendError(res, 404, "NoSuchKey", "Object metadata not found");
+            return;
+        },
+    } orelse {
+        sendError(res, 404, "NoSuchKey", "Object metadata not found");
+        return;
+    };
+
     var file = Io.Dir.cwd().openFile(io, path, .{}) catch {
         sendError(res, 404, "NoSuchKey", "Object not found");
         return;
@@ -1067,13 +1146,15 @@ pub fn handleGetObject(
         return;
     };
 
-    const last_modified = allocHttpDate(allocator, @intCast(@divFloor(stat.mtime.toNanoseconds(), std.time.ns_per_s))) catch {
+    const last_modified = allocHttpDate(allocator, meta.last_modified) catch {
         file.close(io);
         sendError(res, 500, "InternalError", "Date format failed");
         return;
     };
 
-    // For range requests, use sendFile without ETag (efficient for large files)
+    const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
+
+    // Handle range request — stream via sendFile
     if (req.header("range")) |range_header| {
         if (parseRange(range_header, stat.size)) |range| {
             const len = range.end - range.start + 1;
@@ -1089,33 +1170,22 @@ pub fn handleGetObject(
             res.setHeader("Content-Range", content_range);
             res.setHeader("Accept-Ranges", "bytes");
             res.setHeader("Last-Modified", last_modified);
+            res.setHeader("ETag", etag);
+            if (meta.content_type.len > 0)
+                res.setHeader("Content-Type", meta.content_type);
             res.setSendFile(file, len, range.start);
             return;
         }
     }
 
-    // For full file, read content to compute ETag
-    // TODO: fix memory
-    var file_reader = file.reader(io, &.{});
-    const reader = &file_reader.interface;
-    const content = reader.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch {
-        file.close(io);
-        sendError(res, 500, "InternalError", "Read failed");
-        return;
-    };
-    file.close(io);
-
-    const hash = std.hash.Wyhash.hash(0, content);
-    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{hash}) catch {
-        sendError(res, 500, "InternalError", "ETag failed");
-        return;
-    };
-
+    // Full file: stream via sendFile, use metadata for ETag/Content-Type
     res.ok();
     res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("ETag", etag);
     res.setHeader("Last-Modified", last_modified);
-    res.body = content;
+    res.setHeader("ETag", etag);
+    if (meta.content_type.len > 0)
+        res.setHeader("Content-Type", meta.content_type);
+    res.setSendFile(file, stat.size, 0);
 }
 
 pub fn handleHeadBucket(io: Io, data_dir: []const u8, allocator: Allocator, res: *Response, bucket: []const u8) !void {
@@ -1153,6 +1223,30 @@ pub fn handleHeadObject(
     const path = try objectPath(allocator, data_dir, bucket, effective_key);
     defer allocator.free(path);
 
+    // Try reading metadata sidecar first — avoids reading the entire file for ETag
+    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    defer allocator.free(meta_path);
+    if (try readObjectMeta(io, allocator, meta_path)) |meta| {
+        const last_modified = allocHttpDate(allocator, meta.last_modified) catch {
+            sendError(res, 500, "InternalError", "Date format failed");
+            return;
+        };
+        const len_str = std.fmt.allocPrint(allocator, "{d}", .{meta.size}) catch {
+            sendError(res, 500, "InternalError", "Format failed");
+            return;
+        };
+        // Add HTTP quotes around bare ETag stored in metadata
+        const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
+        res.ok();
+        res.setHeader("Content-Type", meta.content_type);
+        res.setHeader("Content-Length", len_str);
+        res.setHeader("Accept-Ranges", "bytes");
+        res.setHeader("ETag", etag);
+        res.setHeader("Last-Modified", last_modified);
+        return;
+    }
+
+    // Fallback: no meta file — stat + read full file for ETag (old data)
     var file = Io.Dir.cwd().openFile(io, path, .{}) catch {
         sendError(res, 404, "NoSuchKey", "Object not found");
         return;
@@ -1164,8 +1258,6 @@ pub fn handleHeadObject(
         return;
     };
 
-    // Compute ETag from file content (same as PUT uses)
-    // TODO: fix memory
     var file_reader = file.reader(io, &.{});
     const reader = &file_reader.interface;
     const content = reader.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch {
@@ -1220,8 +1312,27 @@ pub fn handlePutObject(
     defer tmp_file.close(io);
 
     var file_writer = tmp_file.writer(io, &.{});
-    (&file_writer.interface).writeAll(req.body) catch {
+
+    var hash_buf: [2 * 1024 * 1024]u8 = undefined;
+    var hash_writer = Io.Writer.hashed(&file_writer.interface, std.hash.Wyhash.init(0), &hash_buf);
+
+    while (true) {
+        _ = req.body.stream(&hash_writer.writer, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => {
+                sendError(res, 500, "InternalError", "Cannot write file");
+                return;
+            },
+        };
+    }
+    hash_writer.writer.flush() catch {
         sendError(res, 500, "InternalError", "Cannot write file");
+        return;
+    };
+
+    // Use fast hash for ETag (wyhash is ~10x faster than SHA256)
+    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{hash_writer.hasher.final()}) catch {
+        sendError(res, 500, "InternalError", "ETag failed");
         return;
     };
 
@@ -1236,20 +1347,40 @@ pub fn handlePutObject(
     defer allocator.free(path);
 
     if (Io.Dir.path.dirname(path)) |dir| {
-        Io.Dir.cwd().createDirPath(io, dir) catch {};
+        Io.Dir.cwd().createDirPath(io, dir) catch |err| {
+            std.log.err("createDirPath error: {t}", .{err});
+        };
     }
 
     try dir_tmp.rename(tmp_file_path, Io.Dir.cwd(), path, io);
 
-    // Use fast hash for ETag (wyhash is ~10x faster than SHA256)
-    const hash = std.hash.Wyhash.hash(0, req.body);
-    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{hash}) catch {
-        sendError(res, 500, "InternalError", "ETag failed");
-        return;
+    // Write metadata sidecar
+    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    defer allocator.free(meta_path);
+
+    const content_type = req.header("content-type") orelse "binary/octet-stream";
+    const content_encoding = req.header("content-encoding") orelse "";
+    const last_modified: i64 = @intCast(@divFloor(Io.Timestamp.now(io, .real).toSeconds(), 1));
+
+    // Strip HTTP quotes for JSON-safe metadata storage
+    const bare_etag = if (etag.len >= 2 and etag[0] == '"' and etag[etag.len - 1] == '"')
+        etag[1 .. etag.len - 1]
+    else
+        etag;
+
+    writeObjectMeta(io, allocator, meta_path, .{
+        .content_type = content_type,
+        .content_encoding = content_encoding,
+        .etag = bare_etag,
+        .last_modified = last_modified,
+        .size = std.fmt.parseInt(u64, req.header("content-length") orelse "0", 10) catch 0,
+    }) catch |err| {
+        std.log.warn("Failed to write metadata for {s}: {}", .{ key, err });
     };
 
     res.ok();
     res.setHeader("ETag", etag);
+    if (content_type.len > 0) res.setHeader("Content-Type", content_type);
 }
 
 pub fn handleDeleteBucket(
@@ -1300,6 +1431,14 @@ fn deleteObjectInternal(io: Io, data_dir: []const u8, allocator: Allocator, buck
     Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => std.log.warn("delete failed: {}", .{err}),
+    };
+
+    // Delete metadata sidecar if it exists
+    const meta_path = std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path}) catch return;
+    defer allocator.free(meta_path);
+    Io.Dir.cwd().deleteFile(io, meta_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => std.log.warn("failed to delete metadata: {}", .{err}),
     };
 
     // Clean up empty parent directories up to bucket level
@@ -1360,14 +1499,17 @@ pub fn handleDeleteObjects(io: Io, data_dir: []const u8, allocator: Allocator, r
     try xml.appendSlice(allocator, "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
 
     // Simple XML parsing - find all <Key>...</Key> pairs
-    var body = req.body;
+    var body = req.body.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch {
+        sendError(res, 400, "InvalidBody", "Recv File Error");
+        return;
+    };
 
     while (std.mem.indexOf(u8, body, "<Key>")) |start| {
         const key_start = start + 5;
         const end = std.mem.indexOf(u8, body[key_start..], "</Key>") orelse break;
         const key = body[key_start .. key_start + end];
 
-        if (key.len > 0 and isValidKey(key)) {
+        if (key.len > 0 and isValidKey(key) and !isReservedKey(key)) {
             const path = objectPath(allocator, data_dir, bucket, key) catch continue;
             defer allocator.free(path);
 
@@ -1391,6 +1533,11 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     const tracy_fun = trace(@src());
     defer tracy_fun.end();
 
+    if (isReservedKey(key)) {
+        sendError(res, 400, "InvalidArgument", "Key uses reserved suffix");
+        return;
+    }
+
     // Generate unique upload ID using timestamp + random bytes to prevent collision
     const timestamp: u64 = @intCast(Io.Timestamp.now(io, .real).toSeconds());
     var random_bytes: [8]u8 = undefined;
@@ -1401,7 +1548,9 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     const parts_dir = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id }) catch return;
     defer allocator.free(parts_dir);
-    Io.Dir.cwd().createDirPath(io, parts_dir) catch {};
+    Io.Dir.cwd().createDirPath(io, parts_dir) catch |err| {
+        std.log.err("createDirPath error: {t}", .{err});
+    };
 
     const meta_path = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}/.meta", .{ data_dir, upload_id }) catch return;
     defer allocator.free(meta_path);
@@ -1412,7 +1561,7 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     defer allocator.free(meta_content);
 
     var writer = meta_file.writer(io, &.{});
-    (&writer.interface).writeAll(meta_content) catch {};
+    try (&writer.interface).writeAll(meta_content);
 
     var xml: std.ArrayListUnmanaged(u8) = .empty;
     defer xml.deinit(allocator);
@@ -1463,10 +1612,13 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
         sendError(res, 500, "InternalError", "Cannot create final file");
         return;
     };
-    defer final_file.close(io);
+    // Note: no defer close — we close explicitly after assembly
 
     var final_file_writer = final_file.writer(io, &.{});
-    const writer = &final_file_writer.interface;
+
+    var hash_buf: [2 * 1024 * 1024]u8 = undefined;
+    var hash_writer = Io.Writer.hashed(&final_file_writer.interface, std.crypto.hash.Md5.init(.{}), &hash_buf);
+    const writer = &hash_writer.writer;
 
     var dir = Io.Dir.cwd().openDir(io, parts_dir, .{ .iterate = true }) catch {
         sendError(res, 404, "NoSuchUpload", "Upload not found");
@@ -1508,21 +1660,30 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
         var part_file_reader = part_file.reader(io, &.{});
         const reader = &part_file_reader.interface;
 
-        const stat = part_file.stat(io) catch continue;
-        const data = allocator.alloc(u8, stat.size) catch continue;
-        defer allocator.free(data);
+        hash_writer.hasher = std.crypto.hash.Md5.init(.{});
+        while (true) {
+            _ = reader.stream(writer, .limited(MAX_BODY_SIZE)) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => {
+                    sendError(res, 500, "InternalError", "Cannot write part");
+                    return;
+                },
+            };
+        }
 
-        const bytes_read = reader.readSliceShort(data) catch continue;
-        writer.writeAll(data[0..bytes_read]) catch |err| {
-            std.log.warn("failed to write part {d}: {}", .{ part_num, err });
-            continue;
+        hash_writer.writer.flush() catch {
+            sendError(res, 500, "InternalError", "Cannot write part");
+            return;
         };
 
         var part_hash: [16]u8 = undefined;
-        std.crypto.hash.Md5.hash(data[0..bytes_read], &part_hash, .{});
+        hash_writer.hasher.final(&part_hash);
         hasher.update(&part_hash);
         parts_assembled += 1;
     }
+
+    // Close final file before stat + meta write
+    final_file.close(io);
 
     Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
         std.log.warn("failed to cleanup upload dir: {}", .{err});
@@ -1530,6 +1691,38 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     var final_hash: [16]u8 = undefined;
     hasher.final(&final_hash);
+
+    // Build etag value for both XML and metadata
+    const etag_value = std.fmt.allocPrint(allocator, "\"{x}-{d}\"", .{ final_hash, parts_assembled }) catch {
+        sendError(res, 500, "InternalError", "ETag failed");
+        return;
+    };
+    defer allocator.free(etag_value);
+
+    // Strip HTTP quotes for JSON-safe metadata storage
+    const bare_etag = if (etag_value.len >= 2 and etag_value[0] == '"' and etag_value[etag_value.len - 1] == '"')
+        etag_value[1 .. etag_value.len - 1]
+    else
+        etag_value;
+
+    // Stat the assembled file for metadata
+    const assembled_stat = Io.Dir.cwd().statFile(io, final_path, .{}) catch {
+        sendError(res, 500, "InternalError", "Stat failed");
+        return;
+    };
+
+    // Write metadata sidecar
+    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{final_path});
+    defer allocator.free(meta_path);
+    writeObjectMeta(io, allocator, meta_path, .{
+        .content_type = "binary/octet-stream",
+        .content_encoding = "",
+        .etag = bare_etag,
+        .last_modified = @intCast(@divFloor(Io.Timestamp.now(io, .real).toSeconds(), 1)),
+        .size = assembled_stat.size,
+    }) catch |err| {
+        std.log.warn("Failed to write metadata for multipart upload: {}", .{err});
+    };
 
     var xml: std.ArrayListUnmanaged(u8) = .empty;
     defer xml.deinit(allocator);
@@ -1541,9 +1734,9 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     try xml.appendSlice(allocator, "</Bucket><Key>");
     try xmlEscape(allocator, &xml, key);
 
-    var etag_buf: [72]u8 = undefined;
-    const etag = std.fmt.bufPrint(&etag_buf, "</Key><ETag>\"{x}-{d}\"</ETag>", .{ final_hash, parts_assembled }) catch "</Key><ETag>\"\"</ETag>";
-    try xml.appendSlice(allocator, etag);
+    try xml.appendSlice(allocator, "</Key><ETag>");
+    try xml.appendSlice(allocator, etag_value);
+    try xml.appendSlice(allocator, "</ETag>");
     try xml.appendSlice(allocator, "</CompleteMultipartUploadResult>");
 
     res.ok();
@@ -1592,13 +1785,26 @@ pub fn handleUploadPart(
     defer file.close(io);
 
     var file_writer = file.writer(io, &.{});
-    (&file_writer.interface).writeAll(req.body) catch {
+
+    var hash_buf: [2 * 1024 * 1024]u8 = undefined;
+    var hash_writer = Io.Writer.hashed(&file_writer.interface, std.crypto.hash.sha2.Sha256.init(.{}), &hash_buf);
+
+    while (true) {
+        _ = req.body.stream(&hash_writer.writer, .limited(MAX_BODY_SIZE)) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => {
+                sendError(res, 500, "InternalError", "Cannot write part");
+                return;
+            },
+        };
+    }
+    hash_writer.writer.flush() catch {
         sendError(res, 500, "InternalError", "Cannot write part");
         return;
     };
-
-    const etag_hash = SigV4.hash(req.body);
-    const etag = try std.fmt.allocPrint(allocator, "\"{x}\"", .{etag_hash});
+    var out: [32]u8 = undefined;
+    hash_writer.hasher.final(&out);
+    const etag = try std.fmt.allocPrint(allocator, "\"{x}\"", .{out});
 
     res.ok();
     res.setHeader("ETag", etag);

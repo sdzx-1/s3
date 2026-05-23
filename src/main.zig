@@ -7,6 +7,7 @@ const zio = @import("zio");
 const acl = @import("acl.zig");
 const troupe = @import("troupe");
 const s3 = @import("s3.zig");
+const zs3 = @import("zs3.zig");
 const run = @import("run.zig");
 const Runner = s3.Runner;
 const EnterState = s3.Start;
@@ -175,10 +176,23 @@ fn accept_loop(
         ctx.tmp_dir = tmp_dir;
         ctx.io = io;
         ctx.stream = stream;
-        ctx.stream_reader = stream.reader(io, &.{});
-        ctx.stream_writer = stream.writer(io, &.{});
+        ctx.socket_fd = stream.socket.handle;
         ctx.arena_allocaotr = .init(gpa);
-        //TODO: free ctx
+        ctx.net_stream_reader = stream.reader(io, &ctx.read_buf);
+        ctx.net_stream_writer = stream.writer(io, &ctx.write_buf);
+
+        ctx.reader = .{
+            .in = &ctx.net_stream_reader.interface,
+            .max_head_len = zs3.MAX_HEADER_SIZE,
+            .state = .ready,
+            .interface = undefined,
+        };
+
+        ctx.writer = &ctx.net_stream_writer.interface;
+
+        // ctx.stream_reader = &ctx.net_stream_reader.interface;
+        // ctx.stream_writer = &ctx.net_stream_writer.interface;
+
         const client_future = try io.concurrent(run.client, .{
             Runner.idFromState(EnterState),
             msg_channel,

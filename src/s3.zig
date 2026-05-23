@@ -6,6 +6,7 @@ const troupe = @import("troupe");
 const Data = troupe.Data;
 const acl = @import("acl.zig");
 const zs3 = @import("zs3.zig");
+const http = std.http;
 
 pub const MsgWrapper = struct {
     id: usize, // cast form client's WaitMsg address
@@ -72,10 +73,19 @@ pub const ClientContext = struct {
     data_dir: []const u8,
     tmp_dir: []const u8,
     io: Io,
+
     stream: Io.net.Stream,
-    stream_writer: Io.net.Stream.Writer,
-    stream_reader: Io.net.Stream.Reader,
+    socket_fd: std.posix.fd_t = 0,
+
+    read_buf: [zs3.MAX_HEADER_SIZE]u8,
+    write_buf: [1024 * 4]u8,
+
+    net_stream_writer: Io.net.Stream.Writer,
+    net_stream_reader: Io.net.Stream.Reader,
     arena_allocaotr: std.heap.ArenaAllocator,
+
+    reader: http.Reader,
+    writer: *Io.Writer,
 
     is_res: bool = false,
 
@@ -128,6 +138,8 @@ pub const Errors = enum {
     parse_requeset_failed,
     stream_write_failed,
     invalid_authorization,
+    invalid_request,
+    payload_too_large,
     //Route
     invalid_bucket_name,
     invalid_key,
@@ -154,43 +166,90 @@ pub const Start = union(enum) {
     pub const info = s3_info("Start", .client, &.{.server});
 
     pub fn process(ctx: *ClientContext) @This() {
-        var total_read: usize = 0;
-        while (total_read < ctx.header_buf.len) {
-            var slices: [1][]u8 = .{ctx.header_buf[total_read..]};
-            const n = (&ctx.stream_reader.interface).readVec(&slices) catch |err| switch (err) {
-                error.EndOfStream => break,
-                error.ReadFailed => return .{ .failed = .{ .data = .read_header_failed } },
-            };
-            if (n == 0) break;
-            total_read += n;
-            if (zs3.findHeaderEnd(ctx.header_buf[0..total_read])) |_| break;
-        }
-        if (total_read == 0) return .{ .failed = .{ .data = .header_too_short } };
-        if (total_read == ctx.header_buf.len and zs3.findHeaderEnd(ctx.header_buf[0..total_read]) == null) {
-            return .{ .failed = .{ .data = .header_too_long } };
-        }
-
-        const data = ctx.header_buf[0..total_read];
+        const data = ctx.reader.receiveHead() catch {
+            zs3.sendError(&ctx.res, 400, "InvalidHeader", "Read Header Failed");
+            return .{ .failed = .{ .data = .read_header_failed } };
+        };
 
         if (!zs3.hasAuth(data)) {
-            _ = (&ctx.stream_writer.interface).write(zs3.ERROR_403) catch return .{ .failed = .{ .data = .stream_write_failed } };
+            _ = ctx.writer.writeAll(zs3.ERROR_403) catch return .{ .failed = .{ .data = .stream_write_failed } };
             return .{ .failed = .{ .data = .header_no_auth } };
         }
 
         const arena = ctx.arena_allocaotr.allocator();
 
-        const req = zs3.parseRequestFromBuf(
-            arena,
-            data,
-            &ctx.stream_reader.interface,
-            &ctx.stream_writer.interface,
-        ) catch return .{ .failed = .{ .data = .parse_requeset_failed } };
+        const line_end = std.mem.indexOf(u8, data, "\r\n") orelse {
+            zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
+            return .{ .failed = .{ .data = .invalid_request } };
+        };
 
-        ctx.req = req;
+        const request_line = data[0..line_end];
+
+        var parts = std.mem.splitScalar(u8, request_line, ' ');
+        const method = parts.next() orelse {
+            zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
+            return .{ .failed = .{ .data = .invalid_request } };
+        };
+        const full_path = parts.next() orelse {
+            zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
+            return .{ .failed = .{ .data = .invalid_request } };
+        };
+        var path: []const u8 = full_path;
+        var query: []const u8 = "";
+        if (std.mem.indexOf(u8, full_path, "?")) |q_idx| {
+            path = full_path[0..q_idx];
+            query = full_path[q_idx + 1 ..];
+        }
+
+        var headers = std.StringHashMap([]const u8).init(arena);
+        const header_section = data[line_end + 2 ..];
+
+        var header_lines = std.mem.splitSequence(u8, header_section, "\r\n");
+        while (header_lines.next()) |line| {
+            if (line.len == 0) continue;
+            const colon = std.mem.indexOf(u8, line, ":") orelse continue;
+            var name_buf: [128]u8 = undefined;
+            const name = std.ascii.lowerString(&name_buf, std.mem.trim(u8, line[0..colon], " "));
+            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+            headers.put(
+                arena.dupe(u8, name) catch unreachable,
+                arena.dupe(u8, value) catch unreachable,
+            ) catch unreachable;
+        }
+
+        ctx.req.method = arena.dupe(u8, method) catch unreachable;
+        ctx.req.path = arena.dupe(u8, path) catch unreachable;
+        ctx.req.query = arena.dupe(u8, query) catch unreachable;
+        ctx.req.headers = headers;
+
+        var content_length: ?u64 = null;
+        if (headers.get("content-length")) |cl_str| {
+            content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
+            if (content_length.? > zs3.MAX_BODY_SIZE) {
+                zs3.sendError(&ctx.res, 400, "PayloadTooLarge", "");
+                return .{ .failed = .{ .data = .payload_too_large } };
+            }
+            if (content_length.? > 0) {
+                // Handle Expect: 100-continue - send 100 Continue before reading body
+                if (headers.get("expect")) |expect| {
+                    if (std.ascii.eqlIgnoreCase(expect, "100-continue")) {
+                        ctx.writer.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch {
+                            std.log.err("100-continue send error", .{});
+                        };
+                        ctx.writer.flush() catch {
+                            std.log.err("100-continue send error", .{});
+                        };
+                    }
+                }
+            }
+        }
+
+        ctx.req.body = ctx.reader.bodyReader(&ctx.read_buf, .none, content_length);
+
         ctx.res = zs3.Response.init(arena);
         ctx.is_res = true;
 
-        const auth_header = req.header("authorization") orelse "";
+        const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {
             zs3.sendError(&ctx.res, 403, "AccessDenied", "Invalid authorization");
             return .{ .failed = .{ .data = .invalid_authorization } };
@@ -294,6 +353,10 @@ pub const Route = union(enum) {
         }
         if (key.len > 0 and !zs3.isValidKey(key)) {
             zs3.sendError(&ctx.res, 400, "InvalidKey", "Object key is invalid");
+            return .{ .failed = .{ .data = .invalid_key } };
+        }
+        if (key.len > 0 and zs3.isReservedKey(key)) {
+            zs3.sendError(&ctx.res, 400, "InvalidArgument", "Key uses reserved suffix");
             return .{ .failed = .{ .data = .invalid_key } };
         }
         const arena = ctx.arena_allocaotr.allocator();

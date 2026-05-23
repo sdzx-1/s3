@@ -5,3 +5,5 @@ zig-pkg/
 build/
 *.dot
 *.svg
+data/
+tmp/
