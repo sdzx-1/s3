@@ -236,10 +236,7 @@ pub const Response = struct {
                     stream_writer.flush() catch |err| {
                         std.log.err("stream_writer error: {t}\n", .{err});
                     };
-                    const send_ok = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
-                    if (!send_ok) {
-                        std.log.err("sendfile failed for fd={d} offset={d} size={d}\n", .{ file_fd, self.send_file_offset, self.send_file_size });
-                    }
+                    _ = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
                 } else {
                     // Read+write fallback for small files or non-Linux
                     var file_reader = Io.File.reader(file, io, &.{});
