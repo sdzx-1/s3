@@ -123,6 +123,7 @@ pub fn main(init: std.process.Init) !void {
     defer server.deinit(io);
 
     std.log.info("S3 server listening on http://0.0.0.0:{d}", .{port});
+    std.log.warn("backend: {any}\n", .{zio.ev.backend});
 
     //
     const buffer = try gpa.alloc(s3.MsgWrapper, 1000);

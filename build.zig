@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const backend = b.option(
+        []const u8,
+        "backend",
+        "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
+    );
     //troupe
     const troupe = b.dependency("troupe", .{
         .target = target,
@@ -14,6 +19,7 @@ pub fn build(b: *std.Build) void {
     const zio = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
+        .backend = backend,
     });
 
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
