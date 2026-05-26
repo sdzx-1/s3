@@ -87,8 +87,6 @@ pub const ClientContext = struct {
     reader: http.Reader,
     writer: *Io.Writer,
 
-    is_res: bool = false,
-
     //
     header_buf: [zs3.MAX_HEADER_SIZE]u8,
 
@@ -247,7 +245,6 @@ pub const Start = union(enum) {
         ctx.req.body = ctx.reader.bodyReader(&ctx.read_buf, .none, content_length);
 
         ctx.res = zs3.Response.init(arena);
-        ctx.is_res = true;
 
         const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {

@@ -199,6 +199,7 @@ pub const Response = struct {
     pub fn write(self: *Response, io: Io, stream_writer: *Io.Writer, socket_fd: ?std.posix.fd_t) !void {
         const tracy_fun = trace(@src());
         defer tracy_fun.end();
+        _ = socket_fd;
 
         try stream_writer.print("HTTP/1.1 {d} {s}\r\n", .{ self.status, self.status_text });
 
@@ -226,18 +227,19 @@ pub const Response = struct {
         if (self.send_file) |file| {
             defer file.close(io);
             if (self.send_file_size > 0) {
-                const SEND_THRESHOLD: usize = 64 * 1024;
-                if (builtin.os.tag == .linux and socket_fd != null and self.send_file_size > SEND_THRESHOLD) {
-                    // Use sendfile(2) via thread pool for large files — zero-copy, single syscall
-                    const file_fd: std.posix.fd_t = @intCast(file.handle);
-                    const sock_fd = socket_fd.?;
-                    var offset: i64 = @intCast(self.send_file_offset);
-                    // Ensure headers are flushed before sendfile touches the socket
-                    stream_writer.flush() catch |err| {
-                        std.log.err("stream_writer error: {t}\n", .{err});
-                    };
-                    _ = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
-                } else {
+                // const SEND_THRESHOLD: usize = 64 * 1024;
+                // if (builtin.os.tag != .linux and socket_fd != null and self.send_file_size > SEND_THRESHOLD) {
+                //     // Use sendfile(2) via thread pool for large files — zero-copy, single syscall
+                //     const file_fd: std.posix.fd_t = @intCast(file.handle);
+                //     const sock_fd = socket_fd.?;
+                //     var offset: i64 = @intCast(self.send_file_offset);
+                //     // Ensure headers are flushed before sendfile touches the socket
+                //     stream_writer.flush() catch |err| {
+                //         std.log.err("stream_writer error: {t}\n", .{err});
+                //     };
+                //     _ = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
+                // } else
+                {
                     // Read+write fallback for small files or non-Linux
                     var file_reader = Io.File.reader(file, io, &.{});
                     file_reader.seekTo(self.send_file_offset) catch |err| {
