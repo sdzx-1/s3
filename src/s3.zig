@@ -295,6 +295,8 @@ pub const Start = union(enum) {
 
     pub fn process(ctx: *ClientContext) @This() {
         const arena = ctx.arena_allocaotr.allocator();
+        ctx.res = zs3.Response.init(arena);
+
         const data = ctx.reader.receiveHead() catch {
             zs3.sendError(&ctx.res, 400, "InvalidHeader", "Read Header Failed");
             ctx.s3_error = .{ .start = .read_header_failed };
@@ -382,8 +384,6 @@ pub const Start = union(enum) {
         }
 
         ctx.req.body = ctx.reader.bodyReader(&ctx.read_buf, .none, content_length);
-
-        ctx.res = zs3.Response.init(arena);
 
         const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {
