@@ -25,6 +25,7 @@ pub const MsgUnion = union {
     errors: Errors,
     const_u8: []const u8,
     req_credential_and_id: ReqCredentialAndId,
+    client_context: *ClientContext,
 
     pub fn to(self: @This(), T: type) T {
         return switch (T) {
@@ -33,6 +34,7 @@ pub const MsgUnion = union {
             Errors => self.errors,
             []const u8 => self.const_u8,
             ReqCredentialAndId => self.req_credential_and_id,
+            *ClientContext => self.client_context,
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
@@ -44,6 +46,7 @@ pub const MsgUnion = union {
             Errors => .{ .errors = val },
             []const u8 => .{ .const_u8 = val },
             ReqCredentialAndId => .{ .req_credential_and_id = val },
+            *ClientContext => .{ .client_context = val },
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
@@ -93,6 +96,62 @@ pub const ClientContext = struct {
     parsed_auth_header: zs3.SigV4.ParsedAuth,
     credential: acl.Credential,
     id: usize,
+
+    s3_error: ?S3Error = null,
+};
+
+pub const S3Error = union(enum) {
+    start: StartStageError,
+    route: RouteStageError,
+};
+
+pub const StartStageError = enum {
+    read_header_failed,
+    header_too_short,
+    header_too_long,
+    header_no_auth,
+    parse_requeset_failed,
+    stream_write_failed,
+    invalid_authorization,
+    invalid_request,
+    payload_too_large,
+};
+
+pub const RouteStageError = union(enum) {
+    invalid_bucket_name: IoError,
+    invalid_key: IoError,
+    handleListBuckets: IoError,
+    handleListObjects: IoError,
+    handleGetObject: IoError,
+    handleCreateBucket: IoError,
+    handleUploadPart: IoError,
+    handlePutObject: IoError,
+    handleDeleteBucket: IoError,
+    handleAbortMultipart: IoError,
+    handleDeleteObject: IoError,
+    handleHeadBucket: IoError,
+    handleHeadObject: IoError,
+    handleDeleteObjects: IoError,
+    handleInitiateMultipart: IoError,
+    handleCompleteMultipart: IoError,
+};
+
+pub const IoError = union(enum) {
+    stream_reader_err: Io.net.Stream.Reader.Error,
+    stream_writer_err: Io.net.Stream.Writer.Error,
+
+    file_reader_err: Io.File.Reader.Error,
+    file_reader_size_err: Io.File.Reader.SizeError,
+    file_reader_seek_err: Io.File.Reader.SeekError,
+
+    file_writer_err: Io.File.Writer.Error,
+    file_writer_file_err: Io.File.Writer.WriteFileError,
+    file_writer_seek_err: Io.File.Writer.SeekError,
+
+    dir_open_err: Io.Dir.OpenError,
+    file_open_err: Io.File.OpenError,
+    create_dir_error: Io.Dir.CreateDirError,
+    create_dir_path_error: Io.Dir.CreateDirPathError,
 };
 
 pub const Role = enum { client, server };
@@ -115,6 +174,7 @@ fn s3_info(
 }
 
 const ReqCredentialAndId = struct {
+    client_context: *ClientContext,
     access_key: []const u8,
     credential: *acl.Credential,
     id: *usize,
@@ -150,28 +210,52 @@ pub const Errors = enum {
     handleCompleteMultipart,
 };
 
+pub const Error = union(enum) {
+    exit: Data(void, troupe.Exit),
+
+    pub const info = s3_info("Route", .server, &.{.client});
+
+    pub fn process(ctx: *ServerContext) @This() {
+        _ = ctx;
+        return .exit;
+    }
+
+    pub fn preprocess_0(ctx: *ClientContext, msg: @This()) void {
+        _ = ctx;
+        _ = msg;
+    }
+};
+
 pub const Start = union(enum) {
     req_credential_and_id: Data(ReqCredentialAndId, ServerLookupCredential),
-    failed: Data(Errors, troupe.Exit),
+    failed: Data(*ClientContext, Error),
 
     pub const info = s3_info("Start", .client, &.{.server});
 
     pub fn process(ctx: *ClientContext) @This() {
         const data = ctx.reader.receiveHead() catch {
             zs3.sendError(&ctx.res, 400, "InvalidHeader", "Read Header Failed");
-            return .{ .failed = .{ .data = .read_header_failed } };
+            ctx.s3_error = .{ .start = .read_header_failed };
+            return .{ .failed = .{ .data = ctx } };
         };
 
         if (!zs3.hasAuth(data)) {
-            _ = ctx.writer.writeAll(zs3.ERROR_403) catch return .{ .failed = .{ .data = .stream_write_failed } };
-            return .{ .failed = .{ .data = .header_no_auth } };
+            _ = ctx.writer.writeAll(zs3.ERROR_403) catch {
+                ctx.s3_error = .{ .start = .stream_write_failed };
+                return .{ .failed = .{ .data = ctx } };
+            };
+
+            ctx.s3_error = .{ .start = .header_no_auth };
+            return .{ .failed = .{ .data = ctx } };
         }
 
         const arena = ctx.arena_allocaotr.allocator();
 
         const line_end = std.mem.indexOf(u8, data, "\r\n") orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-            return .{ .failed = .{ .data = .invalid_request } };
+
+            ctx.s3_error = .{ .start = .invalid_request };
+            return .{ .failed = .{ .data = ctx } };
         };
 
         const request_line = data[0..line_end];
@@ -179,11 +263,13 @@ pub const Start = union(enum) {
         var parts = std.mem.splitScalar(u8, request_line, ' ');
         const method = parts.next() orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-            return .{ .failed = .{ .data = .invalid_request } };
+            ctx.s3_error = .{ .start = .invalid_request };
+            return .{ .failed = .{ .data = ctx } };
         };
         const full_path = parts.next() orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-            return .{ .failed = .{ .data = .invalid_request } };
+            ctx.s3_error = .{ .start = .invalid_request };
+            return .{ .failed = .{ .data = ctx } };
         };
         var path: []const u8 = full_path;
         var query: []const u8 = "";
@@ -218,7 +304,8 @@ pub const Start = union(enum) {
             content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
             if (content_length.? > zs3.MAX_BODY_SIZE) {
                 zs3.sendError(&ctx.res, 400, "PayloadTooLarge", "");
-                return .{ .failed = .{ .data = .payload_too_large } };
+                ctx.s3_error = .{ .start = .payload_too_large };
+                return .{ .failed = .{ .data = ctx } };
             }
             if (content_length.? > 0) {
                 // Handle Expect: 100-continue - send 100 Continue before reading body
@@ -242,10 +329,13 @@ pub const Start = union(enum) {
         const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {
             zs3.sendError(&ctx.res, 403, "AccessDenied", "Invalid authorization");
-            return .{ .failed = .{ .data = .invalid_authorization } };
+
+            ctx.s3_error = .{ .start = .invalid_authorization };
+            return .{ .failed = .{ .data = ctx } };
         };
 
         return .{ .req_credential_and_id = .{ .data = .{
+            .client_context = ctx,
             .access_key = ctx.parsed_auth_header.access_key,
             .credential = &ctx.credential,
             .id = &ctx.id,
