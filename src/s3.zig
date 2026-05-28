@@ -24,7 +24,6 @@ pub const MsgUnion = union {
     i32: i32,
     errors: Errors,
     const_u8: []const u8,
-    req_credential_and_id: ReqCredentialAndId,
     client_context: *ClientContext,
 
     pub fn to(self: @This(), T: type) T {
@@ -33,7 +32,6 @@ pub const MsgUnion = union {
             i32 => self.i32,
             Errors => self.errors,
             []const u8 => self.const_u8,
-            ReqCredentialAndId => self.req_credential_and_id,
             *ClientContext => self.client_context,
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
@@ -45,7 +43,6 @@ pub const MsgUnion = union {
             i32 => .{ .i32 = val },
             Errors => .{ .errors = val },
             []const u8 => .{ .const_u8 = val },
-            ReqCredentialAndId => .{ .req_credential_and_id = val },
             *ClientContext => .{ .client_context = val },
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
@@ -67,7 +64,7 @@ pub const ServerContext = struct {
     access_control_map: std.StringHashMap(acl.Credential),
     global_counter: usize = 0,
 
-    req_credential_and_id: ReqCredentialAndId = undefined,
+    req_client_context: *ClientContext = undefined,
 };
 
 pub const ClientContext = struct {
@@ -175,13 +172,6 @@ fn s3_info(
     };
 }
 
-const ReqCredentialAndId = struct {
-    client_context: *ClientContext,
-    access_key: []const u8,
-    credential: *acl.Credential,
-    id: *usize,
-};
-
 pub const Errors = enum {
     //Start
     read_header_failed,
@@ -229,7 +219,7 @@ pub const Error = union(enum) {
 };
 
 pub const Start = union(enum) {
-    req_credential_and_id: Data(ReqCredentialAndId, ServerLookupCredential),
+    req_credential_and_id: Data(*ClientContext, ServerLookupCredential),
     failed: Data(*ClientContext, Error),
 
     pub const info = s3_info("Start", .client, &.{.server});
@@ -329,23 +319,24 @@ pub const Start = union(enum) {
         const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {
             zs3.sendError(&ctx.res, 403, "AccessDenied", "Invalid authorization");
-
             ctx.s3_error = .{ .start = .invalid_authorization };
             return .{ .failed = .{ .data = ctx } };
         };
 
-        return .{ .req_credential_and_id = .{ .data = .{
-            .client_context = ctx,
-            .access_key = ctx.parsed_auth_header.access_key,
-            .credential = &ctx.credential,
-            .id = &ctx.id,
-        } } };
+        return .{ .req_credential_and_id = .{ .data = ctx } };
     }
+
+    //     .{
+    //     .client_context = ctx,
+    //     .access_key = ctx.parsed_auth_header.access_key,
+    //     .credential = &ctx.credential,
+    //     .id = &ctx.id,
+    // }
 
     pub fn preprocess_0(ctx: *ServerContext, msg: @This()) void {
         switch (msg) {
             .req_credential_and_id => |req_c| {
-                ctx.req_credential_and_id = req_c.data;
+                ctx.req_client_context = req_c.data;
             },
             else => {},
         }
@@ -359,9 +350,9 @@ pub const ServerLookupCredential = union(enum) {
 
     pub fn process(ctx: *ServerContext) @This() {
         ctx.global_counter += 1;
-        if (ctx.access_control_map.get(ctx.req_credential_and_id.access_key)) |credential| {
-            ctx.req_credential_and_id.credential.* = credential;
-            ctx.req_credential_and_id.id.* = ctx.global_counter;
+        if (ctx.access_control_map.get(ctx.req_client_context.parsed_auth_header.access_key)) |credential| {
+            ctx.req_client_context.credential = credential;
+            ctx.req_client_context.id = ctx.global_counter;
             return .ok;
         }
         return .no_access_key;
