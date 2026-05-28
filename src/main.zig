@@ -18,6 +18,7 @@ pub fn main(init: std.process.Init) !void {
     var port: u16 = 9000;
     var data_dir: []const u8 = "data";
     var tmp_dir: []const u8 = "tmp";
+    var log_file: []const u8 = ".s3.log";
     var raw_acl_list: []const u8 = "admin:minioadmin:minioadmin";
     var show_help: bool = false;
     var executor_threads: u6 = 4;
@@ -29,6 +30,8 @@ pub fn main(init: std.process.Init) !void {
             data_dir = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--tmp-dir=")) {
             tmp_dir = arg[10..];
+        } else if (std.mem.startsWith(u8, arg, "--log-file=")) {
+            log_file = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--zio-threads=")) {
             executor_threads = std.fmt.parseInt(u6, arg[14..], 10) catch |err| {
                 std.log.err("Invalid threads: {t}", .{err});
@@ -72,13 +75,16 @@ pub fn main(init: std.process.Init) !void {
             \\  --tmp-dir={s}
             \\      The directory to store tmp object data
             \\
+            \\  --log-file={s}
+            \\      The s3 log file
+            \\
             \\  --acl={s}
             \\      The credentials for access
             \\
             \\  --help, -h
             \\      Show this help
             \\
-        , .{ port, executor_threads, data_dir, tmp_dir, raw_acl_list });
+        , .{ port, executor_threads, data_dir, tmp_dir, log_file, raw_acl_list });
         return;
     }
 
@@ -91,6 +97,11 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, raw_acl_list, "admin:minioadmin:minioadmin")) {
         std.log.warn("Using built-in default credentials (admin:minioadmin:minioadmin) — DO NOT USE IN PRODUCTION", .{});
     }
+
+    // var dot_file = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
+    // var dot_file_wirter = dot_file.writer(io, &.{});
+    // var graph = try troupe.Graph.initWithFsm(gpa, EnterState);
+    // try graph.generateDot(&dot_file_wirter.interface);
 
     Io.Dir.cwd().createDir(io, data_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -132,6 +143,13 @@ pub fn main(init: std.process.Init) !void {
     const buffer1 = try gpa.alloc(*s3.ClientContext, 1000);
     var clean_channel: run.CleanChannel = .init(buffer1);
 
+    const file_log = Io.Dir.cwd().createFile(io, log_file, .{}) catch |err| {
+        std.log.err("Can't create log file: {s}", .{log_file});
+        return err;
+    };
+    var log_buf: [400]u8 = undefined;
+    var log_writer = file_log.writer(io, &log_buf);
+
     var server_thid = try std.Thread.spawn(.{}, accept_loop, .{
         io,
         gpa,
@@ -147,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
         gpa,
         access_control_map,
         &msg_channel,
+        &log_writer.interface,
     });
     defer s3server_thid.join();
 
@@ -172,24 +191,7 @@ fn accept_loop(
         errdefer stream.close(io);
 
         const ctx = try gpa.create(s3.ClientContext);
-        ctx.wait_msg.re = .init;
-        ctx.data_dir = data_dir;
-        ctx.tmp_dir = tmp_dir;
-        ctx.io = io;
-        ctx.stream = stream;
-        ctx.socket_fd = stream.socket.handle;
-        ctx.arena_allocaotr = .init(gpa);
-        ctx.net_stream_reader = stream.reader(io, &ctx.read_buf);
-        ctx.net_stream_writer = stream.writer(io, &ctx.write_buf);
-
-        ctx.reader = .{
-            .in = &ctx.net_stream_reader.interface,
-            .max_head_len = zs3.MAX_HEADER_SIZE,
-            .state = .ready,
-            .interface = undefined,
-        };
-
-        ctx.writer = &ctx.net_stream_writer.interface;
+        try ctx.init(data_dir, tmp_dir, io, stream, gpa);
 
         const client_future = try io.concurrent(run.client, .{
             Runner.idFromState(EnterState),

@@ -101,36 +101,6 @@ pub const Request = struct {
     }
 };
 
-/// Runs sendfile(2) in a thread-pool worker via blockInPlace.
-/// Handles EAGAIN on non-blocking sockets by blocking-poll inside the worker thread.
-fn sendFileLoop(out_fd: std.posix.fd_t, in_fd: std.posix.fd_t, offset: *i64, count: usize) bool {
-    var remaining = count;
-    while (remaining > 0) {
-        const sent = std.os.linux.sendfile(out_fd, in_fd, offset, remaining);
-        if (sent > remaining) {
-            // sendfile returned an error value (negative errno as usize).
-            // EAGAIN means the socket send buffer is full — poll until writable.
-            const err = @as(i64, @bitCast(@as(u64, sent)));
-            if (err < 0) {
-                const errno_val: u16 = @intCast(-err);
-                if (errno_val == @intFromEnum(std.posix.E.AGAIN)) {
-                    var pfds: [1]std.posix.pollfd = .{.{
-                        .fd = out_fd,
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    }};
-                    _ = std.posix.poll(&pfds, -1) catch return false; // poll failed
-                    continue;
-                }
-            }
-            return false; // unrecoverable error
-        }
-        if (sent == 0) return false; // unexpected EOF
-        remaining -= sent;
-    }
-    return true; // all bytes sent
-}
-
 pub const Response = struct {
     status: u16 = 200,
     status_text: []const u8 = "OK",
@@ -211,39 +181,22 @@ pub const Response = struct {
         if (self.send_file) |file| {
             defer file.close(io);
             if (self.send_file_size > 0) {
-                // const SEND_THRESHOLD: usize = 64 * 1024;
-                // if (builtin.os.tag != .linux and socket_fd != null and self.send_file_size > SEND_THRESHOLD) {
-                //     // Use sendfile(2) via thread pool for large files — zero-copy, single syscall
-                //     const file_fd: std.posix.fd_t = @intCast(file.handle);
-                //     const sock_fd = socket_fd.?;
-                //     var offset: i64 = @intCast(self.send_file_offset);
-                //     // Ensure headers are flushed before sendfile touches the socket
-                //     stream_writer.flush() catch |err| {
-                //         std.log.err("stream_writer error: {t}\n", .{err});
-                //     };
-                //     _ = zio.blockInPlace(sendFileLoop, .{ sock_fd, file_fd, &offset, self.send_file_size });
-                // } else
-                {
-                    // Read+write fallback for small files or non-Linux
-                    var file_reader = Io.File.reader(file, io, &.{});
-                    file_reader.seekTo(self.send_file_offset) catch |err| {
-                        std.log.err("seekTo error: {t}", .{err});
-                    };
-                    var remaining: usize = self.send_file_size;
-                    var read_buf: [65536]u8 = undefined;
-                    while (remaining > 0) {
-                        const to_read = @min(remaining, read_buf.len);
-                        var iovecs: [1][]u8 = .{read_buf[0..to_read]};
-                        const n = file_reader.interface.readVec(&iovecs) catch break;
-                        if (n == 0) break;
-                        var written: usize = 0;
-                        while (written < n) {
-                            const n_written = try stream_writer.write(read_buf[written..n]);
-                            if (n_written == 0) return error.ConnectionResetByPeer;
-                            written += n_written;
-                        }
-                        remaining -= written;
+                var file_reader = Io.File.reader(file, io, &.{});
+                try file_reader.seekTo(self.send_file_offset);
+                var remaining: usize = self.send_file_size;
+                var read_buf: [65536]u8 = undefined;
+                while (remaining > 0) {
+                    const to_read = @min(remaining, read_buf.len);
+                    var iovecs: [1][]u8 = .{read_buf[0..to_read]};
+                    const n = try file_reader.interface.readVec(&iovecs);
+                    if (n == 0) break;
+                    var written: usize = 0;
+                    while (written < n) {
+                        const n_written = try stream_writer.write(read_buf[written..n]);
+                        if (n_written == 0) return error.ConnectionResetByPeer;
+                        written += n_written;
                     }
+                    remaining -= written;
                 }
             }
         } else if (self.body.len > 0) {
@@ -1330,9 +1283,7 @@ pub fn handlePutObject(
     defer allocator.free(path);
 
     if (Io.Dir.path.dirname(path)) |dir| {
-        Io.Dir.cwd().createDirPath(io, dir) catch |err| {
-            std.log.err("createDirPath error: {t}", .{err});
-        };
+        try Io.Dir.cwd().createDirPath(io, dir);
     }
 
     try dir_tmp.rename(tmp_file_path, Io.Dir.cwd(), path, io);
@@ -1531,9 +1482,7 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     const parts_dir = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id }) catch return;
     defer allocator.free(parts_dir);
-    Io.Dir.cwd().createDirPath(io, parts_dir) catch |err| {
-        std.log.err("createDirPath error: {t}", .{err});
-    };
+    try Io.Dir.cwd().createDirPath(io, parts_dir);
 
     const meta_path = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}/.meta", .{ data_dir, upload_id }) catch return;
     defer allocator.free(meta_path);

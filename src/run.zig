@@ -35,12 +35,14 @@ pub fn server(
     gpa: Allocator,
     access_control_map: std.StringHashMap(acl.Credential),
     msg_channel: *MsgChannel,
+    log_writer: *Io.Writer,
 ) void {
     var curr_client: usize = undefined;
     var mmsg: ?Msg = undefined;
     var ctx: ServerContext = .{
         .allocator = gpa,
         .access_control_map = access_control_map,
+        .log_writer = log_writer,
     };
 
     while (true) {
@@ -126,17 +128,9 @@ pub fn client(
     clean_channel: *CleanChannel,
 ) void {
     runClient(curr_id, msg_channel, ctx);
-    ctx.res.write(ctx.io, ctx.writer, ctx.socket_fd) catch |err| {
-        std.log.err("Http response write failed: {t}", .{err});
-    };
-    ctx.writer.flush() catch |err| {
-        std.log.err("client flush error: {t}", .{err});
-    };
     ctx.arena_allocaotr.deinit();
     ctx.stream.close(ctx.io);
-    clean_channel.send(ctx) catch |err| {
-        std.log.err("client clean error: {t}", .{err});
-    };
+    clean_channel.send(ctx) catch unreachable;
 }
 
 pub fn runClient(
