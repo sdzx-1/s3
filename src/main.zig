@@ -191,9 +191,6 @@ fn accept_loop(
 
         ctx.writer = &ctx.net_stream_writer.interface;
 
-        // ctx.stream_reader = &ctx.net_stream_reader.interface;
-        // ctx.stream_writer = &ctx.net_stream_writer.interface;
-
         const client_future = try io.concurrent(run.client, .{
             Runner.idFromState(EnterState),
             msg_channel,

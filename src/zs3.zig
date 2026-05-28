@@ -20,22 +20,6 @@ pub const ERROR_403 = "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\nConnection
 /// Objects with keys ending in this suffix are rejected at the route level.
 pub const META_SUFFIX = ".__s3_meta__";
 
-pub fn findHeaderEnd(data: []const u8) ?usize {
-    const tracy_fun = trace(@src());
-    defer tracy_fun.end();
-
-    if (data.len < 4) return null;
-    const end = data.len - 3;
-    const ptr = data.ptr;
-    var i: usize = 0;
-    while (i < end) : (i += 1) {
-        if (ptr[i] == '\r' and ptr[i + 1] == '\n' and ptr[i + 2] == '\r' and ptr[i + 3] == '\n') {
-            return i;
-        }
-    }
-    return null;
-}
-
 pub fn hasAuth(data: []const u8) bool {
     const tracy_fun = trace(@src());
     defer tracy_fun.end();

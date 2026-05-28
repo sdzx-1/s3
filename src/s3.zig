@@ -87,19 +87,12 @@ pub const ClientContext = struct {
     reader: http.Reader,
     writer: *Io.Writer,
 
-    //
-    header_buf: [zs3.MAX_HEADER_SIZE]u8,
-
     req: zs3.Request,
     res: zs3.Response,
 
     parsed_auth_header: zs3.SigV4.ParsedAuth,
     credential: acl.Credential,
     id: usize,
-
-    pub fn deinit(_: *@This()) void {
-        @panic("TODO");
-    }
 };
 
 pub const Role = enum { client, server };
