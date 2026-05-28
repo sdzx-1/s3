@@ -113,7 +113,9 @@ pub const StartStageError = enum {
     parse_requeset_failed,
     stream_write_failed,
     invalid_authorization,
-    invalid_request,
+    invalid_request_less_line_end,
+    invalid_request_less_method,
+    invalid_request_less_full_path,
     payload_too_large,
 };
 
@@ -244,7 +246,6 @@ pub const Start = union(enum) {
                 ctx.s3_error = .{ .start = .stream_write_failed };
                 return .{ .failed = .{ .data = ctx } };
             };
-
             ctx.s3_error = .{ .start = .header_no_auth };
             return .{ .failed = .{ .data = ctx } };
         }
@@ -253,8 +254,7 @@ pub const Start = union(enum) {
 
         const line_end = std.mem.indexOf(u8, data, "\r\n") orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-
-            ctx.s3_error = .{ .start = .invalid_request };
+            ctx.s3_error = .{ .start = .invalid_request_less_line_end };
             return .{ .failed = .{ .data = ctx } };
         };
 
@@ -263,12 +263,12 @@ pub const Start = union(enum) {
         var parts = std.mem.splitScalar(u8, request_line, ' ');
         const method = parts.next() orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-            ctx.s3_error = .{ .start = .invalid_request };
+            ctx.s3_error = .{ .start = .invalid_request_less_method };
             return .{ .failed = .{ .data = ctx } };
         };
         const full_path = parts.next() orelse {
             zs3.sendError(&ctx.res, 400, "InvalidRequest", "");
-            ctx.s3_error = .{ .start = .invalid_request };
+            ctx.s3_error = .{ .start = .invalid_request_less_full_path };
             return .{ .failed = .{ .data = ctx } };
         };
         var path: []const u8 = full_path;
