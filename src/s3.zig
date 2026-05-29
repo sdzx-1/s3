@@ -55,6 +55,14 @@ pub const WaitMsg = struct {
     re: zio.ResetEvent,
 };
 
+pub const Metrics = struct {
+    start: u32 = 0,
+    server_lookup_credential: u32 = 0,
+    sig_v4: u32 = 0,
+    route: u32 = 0,
+    errors: u32 = 0,
+};
+
 //
 pub const ServerContext = struct {
     allocator: Allocator,
@@ -63,6 +71,7 @@ pub const ServerContext = struct {
 
     req_client_context: *ClientContext = undefined,
     log_writer: *Io.Writer,
+    metrics: Metrics = .{},
 };
 
 pub const ClientContext = struct {
@@ -238,6 +247,7 @@ pub const Error = union(enum) {
     pub const info = s3_info("Error", .server, &.{.client});
 
     pub fn process(ctx: *ServerContext) @This() {
+        ctx.metrics.errors += 1;
         const req_client_context = ctx.req_client_context;
 
         const writer = ctx.log_writer;
@@ -396,6 +406,7 @@ pub const Start = union(enum) {
     }
 
     pub fn preprocess_0(ctx: *ServerContext, msg: @This()) void {
+        ctx.metrics.start += 1;
         switch (msg) {
             .req_credential_and_id => |req_c| {
                 ctx.req_client_context = req_c.data;
@@ -413,6 +424,8 @@ pub const ServerLookupCredential = union(enum) {
     pub const info = s3_info("ServerLookupCredential", .server, &.{.client});
 
     pub fn process(ctx: *ServerContext) @This() {
+        ctx.metrics.server_lookup_credential += 1;
+
         ctx.global_counter += 1;
         if (ctx.access_control_map.get(ctx.req_client_context.parsed_auth_header.access_key)) |credential| {
             ctx.req_client_context.credential = credential;
@@ -462,6 +475,8 @@ pub const SigV4 = union(enum) {
     }
 
     pub fn preprocess_0(ctx: *ServerContext, msg: @This()) void {
+        ctx.metrics.sig_v4 += 1;
+
         switch (msg) {
             .failed => |req_c| {
                 ctx.req_client_context = req_c.data;
@@ -611,6 +626,7 @@ pub const Route = union(enum) {
     }
 
     pub fn preprocess_0(ctx: *ServerContext, msg: @This()) void {
+        ctx.metrics.route += 1;
         switch (msg) {
             .failed => |req_c| {
                 ctx.req_client_context = req_c.data;
