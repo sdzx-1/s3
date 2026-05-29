@@ -130,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
     const address = Io.net.IpAddress.parseIp4("0.0.0.0", port) catch |err| {
         return err;
     };
-    var server = try address.listen(io, .{ .reuse_address = true });
+    var server = try address.listen(io, .{});
     defer server.deinit(io);
 
     std.log.info("S3 server listening on http://0.0.0.0:{d}", .{port});
