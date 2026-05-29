@@ -153,18 +153,18 @@ pub const S3Error = union(enum) {
     route: RouteStageError,
 };
 
-pub const StartStageError = enum {
-    read_header_failed,
-    header_too_short,
-    header_too_long,
-    header_no_auth,
-    parse_requeset_failed,
-    stream_write_failed,
-    invalid_authorization,
-    invalid_request_less_line_end,
-    invalid_request_less_method,
-    invalid_request_less_full_path,
-    payload_too_large,
+pub const StartStageError = union(enum) {
+    read_header_failed: std.http.Reader.HeadError,
+    header_too_short: void,
+    header_too_long: void,
+    header_no_auth: void,
+    parse_requeset_failed: void,
+    stream_write_failed: void,
+    invalid_authorization: void,
+    invalid_request_less_line_end: void,
+    invalid_request_less_method: void,
+    invalid_request_less_full_path: void,
+    payload_too_large: void,
 };
 
 pub const SigV4StageError = enum {
@@ -307,9 +307,9 @@ pub const Start = union(enum) {
         const arena = ctx.arena_allocaotr.allocator();
         ctx.res = zs3.Response.init(arena);
 
-        const data = ctx.reader.receiveHead() catch {
+        const data = ctx.reader.receiveHead() catch |err| {
             zs3.sendError(&ctx.res, 400, "InvalidHeader", "Read Header Failed");
-            ctx.s3_error = .{ .start = .read_header_failed };
+            ctx.s3_error = .{ .start = .{ .read_header_failed = err } };
             return .{ .failed = .{ .data = ctx } };
         };
         ctx.header_buf = arena.dupe(u8, data) catch unreachable;
