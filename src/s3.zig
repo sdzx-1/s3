@@ -63,7 +63,9 @@ pub const Metrics = struct {
     server_lookup_credential: u32 = 0,
     sig_v4: u32 = 0,
     route: u32 = 0,
+    success: u32 = 0,
     errors: u32 = 0,
+    get_metrics: u32 = 0,
 };
 
 //
@@ -306,7 +308,11 @@ pub fn Send(Next: type) type {
                 .failed => |req_c| {
                     ctx.req_client_context = req_c.data;
                 },
-                else => {},
+                .finish => {
+                    if (Next == troupe.Exit) {
+                        ctx.metrics.success += 1;
+                    }
+                },
             }
         }
     };
@@ -319,7 +325,7 @@ pub fn WaitServer(Next: type, fun: ?fn (*ClientContext) anyerror!void) type {
         pub const info = s3_info("WaitServer", .server, &.{.client});
 
         pub fn process(ctx: *ServerContext) @This() {
-            _ = ctx;
+            ctx.metrics.get_metrics += 1;
             return .notify;
         }
 
@@ -337,17 +343,21 @@ pub fn resp_metrics(ctx: *ClientContext) !void {
     const m = ctx.metrics;
     try writer.print(
         \\start: {d},
+        \\get_metrics: {d},
         \\server_lookup_credential: {d},
         \\sig_v4: {d},
         \\route: {d},
+        \\success: {d},
         \\errors: {d},
         \\
     ,
         .{
             m.start,
+            m.get_metrics,
             m.server_lookup_credential,
             m.sig_v4,
             m.route,
+            m.success,
             m.errors,
         },
     );
