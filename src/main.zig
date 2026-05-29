@@ -11,6 +11,7 @@ const zs3 = @import("zs3.zig");
 const run = @import("run.zig");
 const Runner = s3.Runner;
 const EnterState = s3.Start;
+const build_options = @import("build_options");
 
 pub fn main(init: std.process.Init) !void {
 
@@ -44,6 +45,17 @@ pub fn main(init: std.process.Init) !void {
                 std.log.err("Invalid port: {t}", .{err});
                 return;
             };
+        } else if (std.mem.startsWith(u8, arg, "--version")) {
+            std.debug.print(
+                \\s3 compatible storage
+                \\built: {s}
+                \\source version: {s}
+                \\
+            , .{
+                build_options.time,
+                build_options.source_version,
+            });
+            return;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             show_help = true;
         }
@@ -80,6 +92,9 @@ pub fn main(init: std.process.Init) !void {
             \\
             \\  --acl={s}
             \\      The credentials for access
+            \\
+            \\  --version
+            \\      Show current version
             \\
             \\  --help, -h
             \\      Show this help

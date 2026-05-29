@@ -27,11 +27,19 @@ pub fn build(b: *std.Build) void {
     const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse (tracy != null);
     const tracy_callstack_depth: u32 = b.option(u32, "tracy-callstack-depth", "Declare callstack depth for Tracy data. Does nothing if -Dtracy_callstack is not provided") orelse 10;
 
+    var code: u8 = undefined;
+    const git_head = b.runAllowFail(&.{ "git", "rev-parse", "HEAD" }, &code, .ignore) catch "null";
+    const currtime = std.Io.Timestamp.now(b.graph.io, .real).toSeconds();
+    var iso_buf: [20]u8 = undefined;
+    formatIso8601(&iso_buf, currtime);
+
     const options = b.addOptions();
     options.addOption(bool, "enable_tracy", tracy != null);
     options.addOption(bool, "enable_tracy_callstack", tracy_callstack);
     options.addOption(bool, "enable_tracy_allocation", tracy_allocation);
     options.addOption(u32, "tracy_callstack_depth", tracy_callstack_depth);
+    options.addOption([]const u8, "time", &iso_buf);
+    options.addOption([]const u8, "source_version", git_head);
 
     const exe = b.addExecutable(.{
         .name = "s3",
@@ -88,4 +96,22 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+}
+
+pub fn formatIso8601(buf: *[20]u8, timestamp: i64) void {
+    const secs: u64 = if (timestamp > 0) @intCast(timestamp) else 0;
+    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const day = es.getEpochDay();
+    const yd = day.calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+
+    _ = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,
+        @intFromEnum(md.month),
+        md.day_index + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
 }
