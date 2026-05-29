@@ -257,7 +257,16 @@ pub const Error = union(enum) {
 
         const writer = ctx.log_writer;
 
-        writer.print("s3_error: {any}, s3_send_error: {any}, header: {s}", .{
+        if (req_client_context.s3_send_error) |se| {
+            switch (se) {
+                error.SocketUnconnected => {
+                    return .exit;
+                },
+                else => {},
+            }
+        }
+
+        writer.print("s3_error: {any}, s3_send_error: {any}, header: {s}\n", .{
             req_client_context.s3_error,
             req_client_context.s3_send_error,
             req_client_context.header_buf orelse "",
