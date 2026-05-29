@@ -24,6 +24,7 @@ pub const MsgUnion = union {
     i32: i32,
     const_u8: []const u8,
     client_context: *ClientContext,
+    metrics: *Metrics,
 
     pub fn to(self: @This(), T: type) T {
         return switch (T) {
@@ -31,6 +32,7 @@ pub const MsgUnion = union {
             i32 => self.i32,
             []const u8 => self.const_u8,
             *ClientContext => self.client_context,
+            *Metrics => self.metrics,
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
@@ -41,6 +43,7 @@ pub const MsgUnion = union {
             i32 => .{ .i32 = val },
             []const u8 => .{ .const_u8 = val },
             *ClientContext => .{ .client_context = val },
+            *Metrics => .{ .metrics = val },
             else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
@@ -101,6 +104,8 @@ pub const ClientContext = struct {
     parsed_auth_header: zs3.SigV4.ParsedAuth,
     credential: acl.Credential,
     id: usize,
+
+    metrics: Metrics,
 
     s3_error: ?S3Error = null,
     s3_send_error: ?SendError = null,
@@ -297,9 +302,53 @@ pub fn Send(Next: type) type {
         }
     };
 }
+
+pub fn WaitServer(Next: type, fun: ?fn (*ClientContext) anyerror!void) type {
+    return union(enum) {
+        notify: Data(void, Next),
+
+        pub const info = s3_info("WaitServer", .server, &.{.client});
+
+        pub fn process(ctx: *ServerContext) @This() {
+            _ = ctx;
+            return .notify;
+        }
+
+        pub fn preprocess_0(ctx: *ClientContext, _: @This()) void {
+            if (fun) |f| f(ctx) catch {};
+        }
+    };
+}
+
+pub fn resp_metrics(ctx: *ClientContext) !void {
+    const arena = ctx.arena_allocaotr.allocator();
+    const res = &ctx.res;
+    var allocating = Io.Writer.Allocating.init(arena);
+    const writer = &allocating.writer;
+    const m = ctx.metrics;
+    try writer.print(
+        \\start: {d},
+        \\server_lookup_credential: {d},
+        \\sig_v4: {d},
+        \\route: {d},
+        \\errors: {d},
+        \\
+    ,
+        .{
+            m.start,
+            m.server_lookup_credential,
+            m.sig_v4,
+            m.route,
+            m.errors,
+        },
+    );
+    res.body = writer.buffered();
+}
+
 pub const Start = union(enum) {
     req_credential_and_id: Data(*ClientContext, ServerLookupCredential),
     failed: Data(*ClientContext, Send(Error)),
+    get_metrics: Data(*Metrics, WaitServer(Send(troupe.Exit), resp_metrics)),
 
     pub const info = s3_info("Start", .client, &.{.server});
 
@@ -370,6 +419,13 @@ pub const Start = union(enum) {
         ctx.req.query = arena.dupe(u8, query) catch unreachable;
         ctx.req.headers = headers;
 
+        if (std.mem.eql(u8, ctx.req.method, "GET") and
+            std.mem.eql(u8, ctx.req.path, "/_s3_getmetrics") and
+            std.mem.eql(u8, ctx.req.headers.get("authorization") orelse "", "metrics"))
+        {
+            return .{ .get_metrics = .{ .data = &ctx.metrics } };
+        }
+
         var content_length: ?u64 = null;
         if (headers.get("content-length")) |cl_str| {
             content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
@@ -413,6 +469,9 @@ pub const Start = union(enum) {
             },
             .failed => |req_c| {
                 ctx.req_client_context = req_c.data;
+            },
+            .get_metrics => |req_c| {
+                req_c.data.* = ctx.metrics;
             },
         }
     }
