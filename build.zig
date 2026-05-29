@@ -30,8 +30,8 @@ pub fn build(b: *std.Build) void {
     var code: u8 = undefined;
     const git_head = b.runAllowFail(&.{ "git", "rev-parse", "HEAD" }, &code, .ignore) catch "null";
     const currtime = std.Io.Timestamp.now(b.graph.io, .real).toSeconds();
-    var iso_buf: [20]u8 = undefined;
-    formatIso8601(&iso_buf, currtime);
+    var iso_buf: [25]u8 = undefined;
+    formatIso8601_to_e8(&iso_buf, currtime);
 
     const options = b.addOptions();
     options.addOption(bool, "enable_tracy", tracy != null);
@@ -98,15 +98,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 }
 
-pub fn formatIso8601(buf: *[20]u8, timestamp: i64) void {
+pub fn formatIso8601_to_e8(buf: *[25]u8, timestamp: i64) void {
     const secs: u64 = if (timestamp > 0) @intCast(timestamp) else 0;
-    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const es = std.time.epoch.EpochSeconds{ .secs = secs + 8 * 3600 };
     const day = es.getEpochDay();
     const yd = day.calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
 
-    _ = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    _ = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+08:00", .{
         yd.year,
         @intFromEnum(md.month),
         md.day_index + 1,
