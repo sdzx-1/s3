@@ -37,12 +37,12 @@ pub fn server(
     msg_channel: *MsgChannel,
     log_writer: *Io.Writer,
 ) void {
-    var curr_client: usize = undefined;
     var mmsg: ?Msg = undefined;
     var ctx: ServerContext = .{
         .allocator = gpa,
         .access_control_map = access_control_map,
         .log_writer = log_writer,
+        .current_client = undefined,
     };
 
     while (true) {
@@ -50,17 +50,16 @@ pub fn server(
             error.Canceled => return,
             else => unreachable,
         };
-        curr_client = msg_wrapper.id;
+        ctx.current_client = msg_wrapper.id;
         mmsg = msg_wrapper.msg;
-        runServer(&curr_client, &mmsg, &ctx);
+        runServer(&ctx, &mmsg);
     }
 }
 
 /// The current design requires the first message of the protocol to be sent from the client to the server, making the server completely passive.
 pub fn runServer(
-    curr_client: *usize,
-    mmsg: *?Msg,
     ctx: *ServerContext,
+    mmsg: *?Msg,
 ) void {
     const curr_id: Runner.StateId = @enumFromInt(mmsg.*.?.state_id);
     @setEvalBranchQuota(10_000_000);
@@ -74,7 +73,7 @@ pub fn runServer(
                 // Since no message queue is designed for client,
                 // the protocol should not be designed to continuously send messages to the client.
                 const result = Curr_State.process(ctx);
-                const wait_msg: *WaitMsg = @ptrFromInt(curr_client.*);
+                const wait_msg: *WaitMsg = &ctx.current_client.wait_msg;
                 const msgref = &wait_msg.msg;
                 msgref.state_id = @intFromEnum(state_id);
                 switch (result) {
@@ -150,7 +149,7 @@ pub fn runClient(
 
                 var msg_wrapper: MsgWrapper = undefined;
 
-                msg_wrapper.id = @intFromPtr(&ctx.wait_msg);
+                msg_wrapper.id = ctx;
 
                 const msgref = &msg_wrapper.msg;
                 msgref.state_id = @intFromEnum(state_id);
@@ -160,9 +159,7 @@ pub fn runClient(
                         msgref.msg_union = MsgUnion.from(@TypeOf(data.data), data.data);
                     },
                 }
-                msg_channel.send(msg_wrapper) catch {
-                    @panic(std.fmt.comptimePrint("error\n", .{}));
-                };
+                msg_channel.send(msg_wrapper) catch unreachable;
 
                 switch (result) {
                     inline else => |new_fms_state_wit| {
