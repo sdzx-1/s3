@@ -1251,7 +1251,7 @@ pub fn handlePutObject(
     var file_writer = tmp_file.writer(io, &.{});
 
     var hash_buf: [2 * 1024 * 1024]u8 = undefined;
-    var hash_writer = Io.Writer.hashed(&file_writer.interface, std.hash.Wyhash.init(0), &hash_buf);
+    var hash_writer = Io.Writer.hashed(&file_writer.interface, std.crypto.hash.Md5.init(.{}), &hash_buf);
 
     var total: usize = 0;
     while (true) {
@@ -1271,8 +1271,9 @@ pub fn handlePutObject(
         return err;
     };
 
-    // Use fast hash for ETag (wyhash is ~10x faster than SHA256)
-    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{hash_writer.hasher.final()}) catch {
+    var hash: [16]u8 = undefined;
+    hash_writer.hasher.final(&hash);
+    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{&hash}) catch {
         sendError(res, 500, "InternalError", "ETag failed");
         return;
     };
