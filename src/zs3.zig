@@ -708,35 +708,32 @@ pub fn isReservedKey(key: []const u8) bool {
 
 /// Deserialise an ObjectMetaData from a sidecar file.
 /// Returns null if the file doesn't exist or is malformed (graceful degradation).
-pub fn readObjectMeta(io: Io, allocator: Allocator, meta_path: []const u8) !?ObjectMetaData {
-    const file = Io.Dir.cwd().openFile(io, meta_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return null,
-    };
+pub fn readObjectMeta(io: Io, allocator: Allocator, meta_path: []const u8) !ObjectMetaData {
+    const file = try Io.Dir.cwd().openFile(io, meta_path, .{});
     defer file.close(io);
 
     var file_reader = file.reader(io, &.{});
-    const content = file_reader.interface.allocRemaining(allocator, .limited(4096)) catch return null;
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(4096));
     defer allocator.free(content);
 
     // Minimal JSON parser for our flat struct: {"ct":"..","ce":"..","e":"..","lm":123,"sz":123}
-    const obj = std.json.parseFromSliceLeaky(std.json.Value, allocator, content, .{}) catch return null;
+    const obj = try std.json.parseFromSliceLeaky(std.json.Value, allocator, content, .{});
     const map = obj.object;
-    const ct = map.get("ct") orelse return null;
-    const ce = map.get("ce") orelse return null;
-    const et = map.get("e") orelse return null;
-    const lm = map.get("lm") orelse return null;
-    const sz = map.get("sz") orelse return null;
+    const ct = map.get("ct") orelse return error.MetadataError;
+    const ce = map.get("ce") orelse return error.MetadataError;
+    const et = map.get("e") orelse return error.MetadataError;
+    const lm = map.get("lm") orelse return error.MetadataError;
+    const sz = map.get("sz") orelse return error.MetadataError;
 
     const lm_val = switch (lm) {
         .integer => |v| @as(i64, v),
         .float => |v| @as(i64, @intFromFloat(v)),
-        else => return null,
+        else => return error.MetadataError,
     };
     const sz_val = switch (sz) {
         .integer => |v| @as(u64, @intCast(v)),
         .float => |v| @as(u64, @intFromFloat(v)),
-        else => return null,
+        else => return error.MetadataError,
     };
     return ObjectMetaData{
         .content_type = ct.string,
@@ -1064,11 +1061,8 @@ pub fn handleGetObject(
     const meta = readObjectMeta(io, allocator, meta_path) catch |err| switch (err) {
         else => {
             sendError(res, 404, "NoSuchKey", "Object metadata not found");
-            return;
+            return err;
         },
-    } orelse {
-        sendError(res, 404, "NoSuchKey", "Object metadata not found");
-        return;
     };
 
     var file = Io.Dir.cwd().openFile(io, path, .{}) catch {
@@ -1162,67 +1156,24 @@ pub fn handleHeadObject(
     // Try reading metadata sidecar first — avoids reading the entire file for ETag
     const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
     defer allocator.free(meta_path);
-    if (try readObjectMeta(io, allocator, meta_path)) |meta| {
-        const last_modified = allocHttpDate(allocator, meta.last_modified) catch {
-            sendError(res, 500, "InternalError", "Date format failed");
-            return;
-        };
-        const len_str = std.fmt.allocPrint(allocator, "{d}", .{meta.size}) catch {
-            sendError(res, 500, "InternalError", "Format failed");
-            return;
-        };
-        // Add HTTP quotes around bare ETag stored in metadata
-        const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
-        res.ok();
-        res.setHeader("Content-Type", meta.content_type);
-        res.setHeader("Content-Length", len_str);
-        res.setHeader("Accept-Ranges", "bytes");
-        res.setHeader("ETag", etag);
-        res.setHeader("Last-Modified", last_modified);
-        return;
-    }
-
-    // Fallback: no meta file — stat + read full file for ETag (old data)
-    var file = Io.Dir.cwd().openFile(io, path, .{}) catch {
-        sendError(res, 404, "NoSuchKey", "Object not found");
-        return;
-    };
-    defer file.close(io);
-
-    const stat = file.stat(io) catch {
-        sendError(res, 500, "InternalError", "Stat failed");
-        return;
-    };
-
-    var file_reader = file.reader(io, &.{});
-    const reader = &file_reader.interface;
-    const content = reader.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch {
-        sendError(res, 500, "InternalError", "Read failed");
-        return;
-    };
-    defer allocator.free(content);
-
-    const hash = std.hash.Wyhash.hash(0, content);
-    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{hash}) catch {
-        sendError(res, 500, "InternalError", "ETag failed");
-        return;
-    };
-
-    const len_str = std.fmt.allocPrint(allocator, "{d}", .{stat.size}) catch {
-        sendError(res, 500, "InternalError", "Format failed");
-        return;
-    };
-
-    const last_modified = allocHttpDate(allocator, @intCast(@divFloor(stat.mtime.toNanoseconds(), std.time.ns_per_s))) catch {
+    const meta = try readObjectMeta(io, allocator, meta_path);
+    const last_modified = allocHttpDate(allocator, meta.last_modified) catch |err| {
         sendError(res, 500, "InternalError", "Date format failed");
-        return;
+        return err;
     };
-
+    const len_str = std.fmt.allocPrint(allocator, "{d}", .{meta.size}) catch |err| {
+        sendError(res, 500, "InternalError", "Format failed");
+        return err;
+    };
+    // Add HTTP quotes around bare ETag stored in metadata
+    const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
     res.ok();
+    res.setHeader("Content-Type", meta.content_type);
     res.setHeader("Content-Length", len_str);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("ETag", etag);
     res.setHeader("Last-Modified", last_modified);
+    return;
 }
 
 pub fn handlePutObject(

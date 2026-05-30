@@ -230,6 +230,7 @@ pub const RouteStageError = union(enum) {
 
 pub const SumError = error{
     BodyTooShort,
+    MetadataError,
 } ||
     Io.File.OpenError ||
     Io.Dir.OpenError ||
@@ -238,6 +239,8 @@ pub const SumError = error{
     Io.Writer.Error ||
     Io.File.StatError ||
     Io.Reader.StreamError ||
+    Io.Reader.LimitedAllocError ||
+    std.json.ParseError(std.json.Scanner) ||
     std.mem.Allocator.Error;
 
 //TODO: use IoError to replace SumError;
