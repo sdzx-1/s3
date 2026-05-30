@@ -113,10 +113,10 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("Using built-in default credentials (admin:minioadmin:minioadmin) — DO NOT USE IN PRODUCTION", .{});
     }
 
-    // var dot_file = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
-    // var dot_file_wirter = dot_file.writer(io, &.{});
-    // var graph = try troupe.Graph.initWithFsm(gpa, EnterState);
-    // try graph.generateDot(&dot_file_wirter.interface);
+    var dot_file = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
+    var dot_file_wirter = dot_file.writer(io, &.{});
+    var graph = try troupe.Graph.initWithFsm(gpa, EnterState);
+    try graph.generateDot(&dot_file_wirter.interface);
 
     Io.Dir.cwd().createDir(io, data_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},

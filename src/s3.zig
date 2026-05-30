@@ -156,6 +156,7 @@ pub const SendError = Io.net.Stream.Writer.Error;
 
 pub const S3Error = union(enum) {
     start: StartStageError,
+    server_lookup_credential: void,
     sigv4: SigV4StageError,
     route: RouteStageError,
 };
@@ -284,6 +285,22 @@ pub const Error = union(enum) {
     }
 };
 
+pub const Success = union(enum) {
+    exit: Data(void, troupe.Exit),
+
+    pub const info = s3_info("Success", .server, &.{.client});
+
+    pub fn process(ctx: *ServerContext) @This() {
+        ctx.metrics.success += 1;
+        return .exit;
+    }
+
+    pub fn preprocess_0(ctx: *ClientContext, msg: @This()) void {
+        _ = ctx;
+        _ = msg;
+    }
+};
+
 pub fn Send(Next: type) type {
     return union(enum) {
         finish: Data(void, Next),
@@ -308,11 +325,7 @@ pub fn Send(Next: type) type {
                 .failed => |req_c| {
                     ctx.req_client_context = req_c.data;
                 },
-                .finish => {
-                    if (Next == troupe.Exit) {
-                        ctx.metrics.success += 1;
-                    }
-                },
+                .finish => {},
             }
         }
     };
@@ -325,7 +338,7 @@ pub fn WaitServer(Next: type, fun: ?fn (*ClientContext) anyerror!void) type {
         pub const info = s3_info("WaitServer", .server, &.{.client});
 
         pub fn process(ctx: *ServerContext) @This() {
-            ctx.metrics.get_metrics += 1;
+            _ = ctx;
             return .notify;
         }
 
@@ -367,7 +380,7 @@ pub fn resp_metrics(ctx: *ClientContext) !void {
 pub const Start = union(enum) {
     req_credential_and_id: Data(*ClientContext, ServerLookupCredential),
     failed: Data(*ClientContext, Send(Error)),
-    get_metrics: Data(*Metrics, WaitServer(Send(troupe.Exit), resp_metrics)),
+    get_metrics: Data(*Metrics, WaitServer(Send(Success), resp_metrics)),
 
     pub const info = s3_info("Start", .client, &.{.server});
 
@@ -490,6 +503,7 @@ pub const Start = union(enum) {
                 ctx.req_client_context = req_c.data;
             },
             .get_metrics => |req_c| {
+                ctx.metrics.get_metrics += 1;
                 req_c.data.* = ctx.metrics;
             },
         }
@@ -497,7 +511,7 @@ pub const Start = union(enum) {
 };
 pub const ServerLookupCredential = union(enum) {
     ok: Data(void, SigV4),
-    no_access_key: Data(void, Send(troupe.Exit)),
+    no_access_key: Data(void, Send(Error)),
 
     pub const info = s3_info("ServerLookupCredential", .server, &.{.client});
 
@@ -510,6 +524,7 @@ pub const ServerLookupCredential = union(enum) {
             ctx.req_client_context.id = ctx.global_counter;
             return .ok;
         }
+        ctx.req_client_context.s3_error = .server_lookup_credential;
         return .no_access_key;
     }
 
@@ -565,7 +580,7 @@ pub const SigV4 = union(enum) {
 };
 
 pub const Route = union(enum) {
-    ok: Data(void, Send(troupe.Exit)),
+    ok: Data(void, Send(Success)),
     failed: Data(*ClientContext, Send(Error)),
 
     pub const info = s3_info("Route", .client, &.{.server});
