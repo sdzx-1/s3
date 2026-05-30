@@ -130,6 +130,8 @@ pub const ClientContext = struct {
         ctx.net_stream_reader = stream.reader(io, &ctx.read_buf);
         ctx.net_stream_writer = stream.writer(io, &ctx.write_buf);
 
+        ctx.content_length = null;
+
         ctx.reader = .{
             .in = &ctx.net_stream_reader.interface,
             .max_head_len = zs3.MAX_HEADER_SIZE,
@@ -202,13 +204,16 @@ pub const RouteStageError = union(enum) {
     handleCompleteMultipart: SumError,
 };
 
-pub const SumError =
+pub const SumError = error{
+    BodyTooShort,
+} ||
     Io.File.OpenError ||
     Io.Dir.OpenError ||
     Io.Dir.CreateDirError ||
     Io.Dir.RenameError ||
     Io.Writer.Error ||
     Io.File.StatError ||
+    Io.Reader.StreamError ||
     std.mem.Allocator.Error;
 
 //TODO: use IoError to replace SumError;
@@ -457,15 +462,14 @@ pub const Start = union(enum) {
             return .{ .get_metrics = .{ .data = &ctx.metrics } };
         }
 
-        var content_length: ?u64 = null;
         if (headers.get("content-length")) |cl_str| {
-            content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
-            if (content_length.? > zs3.MAX_BODY_SIZE) {
+            ctx.content_length = std.fmt.parseInt(usize, cl_str, 10) catch 0;
+            if (ctx.content_length.? > zs3.MAX_BODY_SIZE) {
                 zs3.sendError(&ctx.res, 400, "PayloadTooLarge", "");
                 ctx.s3_error = .{ .start = .payload_too_large };
                 return .failed;
             }
-            if (content_length.? > 0) {
+            if (ctx.content_length.? > 0) {
                 // Handle Expect: 100-continue - send 100 Continue before reading body
                 if (headers.get("expect")) |expect| {
                     if (std.ascii.eqlIgnoreCase(expect, "100-continue")) {
@@ -480,7 +484,7 @@ pub const Start = union(enum) {
             }
         }
 
-        ctx.req.body = ctx.reader.bodyReader(&ctx.read_buf, .none, content_length);
+        ctx.req.body = ctx.reader.bodyReader(&ctx.read_buf, .none, ctx.content_length);
 
         const auth_header = ctx.req.header("authorization") orelse "";
         ctx.parsed_auth_header = zs3.SigV4.parseAuthHeader(auth_header) orelse {
@@ -633,13 +637,13 @@ pub const Route = union(enum) {
                     return .failed;
                 };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
-                zs3.handleUploadPart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch |err| {
+                zs3.handleUploadPart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key, ctx.content_length.?) catch |err| {
                     zs3.sendError(&ctx.res, 500, "InternalError", "handleUploadPart");
                     ctx.s3_error = .{ .route = .{ .handleUploadPart = err } };
                     return .failed;
                 };
             } else {
-                zs3.handlePutObject(ctx.io, ctx.data_dir, ctx.id, ctx.tmp_dir, arena, &ctx.req, &ctx.res, bucket, key) catch |err| {
+                zs3.handlePutObject(ctx.io, ctx.data_dir, ctx.id, ctx.tmp_dir, arena, &ctx.req, &ctx.res, bucket, key, ctx.content_length.?) catch |err| {
                     zs3.sendError(&ctx.res, 500, "InternalError", "handlePutObject");
                     ctx.s3_error = .{ .route = .{ .handlePutObject = err } };
                     return .failed;

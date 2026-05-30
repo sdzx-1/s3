@@ -1235,6 +1235,7 @@ pub fn handlePutObject(
     res: *Response,
     bucket: []const u8,
     key: []const u8,
+    content_length: usize,
 ) !void {
     const tracy_fun = trace(@src());
     defer tracy_fun.end();
@@ -1252,18 +1253,22 @@ pub fn handlePutObject(
     var hash_buf: [2 * 1024 * 1024]u8 = undefined;
     var hash_writer = Io.Writer.hashed(&file_writer.interface, std.hash.Wyhash.init(0), &hash_buf);
 
+    var total: usize = 0;
     while (true) {
-        _ = req.body.stream(&hash_writer.writer, .unlimited) catch |err| switch (err) {
+        const n = req.body.stream(&hash_writer.writer, .limited(content_length)) catch |err| switch (err) {
             error.EndOfStream => break,
             else => {
                 sendError(res, 500, "InternalError", "Cannot write file");
-                return;
+                return err;
             },
         };
+        total += n;
     }
-    hash_writer.writer.flush() catch {
+
+    if (total != content_length) return error.BodyTooShort;
+    hash_writer.writer.flush() catch |err| {
         sendError(res, 500, "InternalError", "Cannot write file");
-        return;
+        return err;
     };
 
     // Use fast hash for ETag (wyhash is ~10x faster than SHA256)
@@ -1683,6 +1688,7 @@ pub fn handleUploadPart(
     res: *Response,
     bucket: []const u8,
     key: []const u8,
+    content_length: usize,
 ) !void {
     const tracy_fun = trace(@src());
     defer tracy_fun.end();
@@ -1721,15 +1727,18 @@ pub fn handleUploadPart(
     var hash_buf: [2 * 1024 * 1024]u8 = undefined;
     var hash_writer = Io.Writer.hashed(&file_writer.interface, std.crypto.hash.sha2.Sha256.init(.{}), &hash_buf);
 
+    var total: usize = 0;
     while (true) {
-        _ = req.body.stream(&hash_writer.writer, .limited(MAX_BODY_SIZE)) catch |err| switch (err) {
+        const n = req.body.stream(&hash_writer.writer, .limited(content_length)) catch |err| switch (err) {
             error.EndOfStream => break,
             else => {
                 sendError(res, 500, "InternalError", "Cannot write part");
-                return;
+                return err;
             },
         };
+        total += n;
     }
+    if (total != content_length) return error.BodyTooShort;
     hash_writer.writer.flush() catch {
         sendError(res, 500, "InternalError", "Cannot write part");
         return;
