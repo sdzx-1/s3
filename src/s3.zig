@@ -2,8 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zio = @import("zio");
-const troupe = @import("troupe");
-const Data = troupe.Data;
+const polyrole = @import("polyrole");
+const Data = polyrole.Data;
 const acl = @import("acl.zig");
 const zs3 = @import("zs3.zig");
 const http = std.http;
@@ -51,7 +51,7 @@ pub const MsgUnion = union {
 
 pub const MsgChannel = zio.Channel(MsgWrapper);
 
-pub const Runner = troupe.Runner(Start);
+pub const Runner = polyrole.Runner(Start);
 
 pub const WaitMsg = struct {
     msg: Msg,
@@ -241,7 +241,7 @@ fn s3_info(
     StateName: []const u8,
     sender: Role,
     receiver: []const Role,
-) troupe.ProtocolInfo("s3", Role, Context{}, &.{ .client, .server }, &.{troupe.Exit}) {
+) polyrole.ProtocolInfo("s3", Role, Context{}, &.{ .client, .server }, &.{polyrole.Exit}) {
     return .{
         .name = StateName,
         .sender = sender,
@@ -250,7 +250,7 @@ fn s3_info(
 }
 
 pub const Error = union(enum) {
-    exit: Data(void, troupe.Exit),
+    exit: Data(void, polyrole.Exit),
 
     pub const info = s3_info("Error", .server, &.{.client});
 
@@ -286,7 +286,7 @@ pub const Error = union(enum) {
 };
 
 pub const Success = union(enum) {
-    exit: Data(void, troupe.Exit),
+    exit: Data(void, polyrole.Exit),
 
     pub const info = s3_info("Success", .server, &.{.client});
 

@@ -9,8 +9,8 @@ pub fn build(b: *std.Build) void {
         "backend",
         "Override the default event loop backend (io_uring, epoll, kqueue, iocp, poll)",
     );
-    //troupe
-    const troupe = b.dependency("troupe", .{
+    //polyrole
+    const polyrole = b.dependency("polyrole", .{
         .target = target,
         .optimize = optimize,
     });
@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "troupe", .module = troupe.module("root") },
+                .{ .name = "polyrole", .module = polyrole.module("root") },
                 .{ .name = "zio", .module = zio.module("zio") },
             },
             .strip = if (tracy != null) false else if (optimize == .Debug) false else true,

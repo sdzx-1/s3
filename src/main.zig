@@ -5,7 +5,7 @@ const tracy = @import("tracy.zig");
 const trace = tracy.trace;
 const zio = @import("zio");
 const acl = @import("acl.zig");
-const troupe = @import("troupe");
+const polyrole = @import("polyrole");
 const s3 = @import("s3.zig");
 const zs3 = @import("zs3.zig");
 const run = @import("run.zig");
@@ -113,10 +113,13 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("Using built-in default credentials (admin:minioadmin:minioadmin) — DO NOT USE IN PRODUCTION", .{});
     }
 
-    var dot_file = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
-    var dot_file_wirter = dot_file.writer(io, &.{});
-    var graph = try troupe.Graph.initWithFsm(gpa, EnterState);
-    try graph.generateDot(&dot_file_wirter.interface);
+    // var dot_file = try Io.Dir.cwd().createFile(io, "graph.dot", .{});
+    // var dot_file_wirter = dot_file.writer(io, &.{});
+    // var graph = try polyrole.Graph.initWithFsm(gpa, EnterState);
+    // var emoj_map: std.StringHashMap([]const u8) = .init(gpa);
+    // try emoj_map.put("client", " c ");
+    // try emoj_map.put("server", " S ");
+    // try graph.generateDot(&emoj_map, &dot_file_wirter.interface);
 
     Io.Dir.cwd().createDir(io, data_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},

@@ -4,13 +4,13 @@
     .fingerprint = 0xfa1b59dcffb443dc,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .troupe = .{
-            .url = "git+https://github.com/sdzx-1/troupe.git#7fe3cc041d5578f60353fd5b43eed9813d9ebf56",
-            .hash = "troupe-0.0.0-XSD3U2B6AACSTGf4CMI8nkZKgeR8OaNxq9V-aFMg73_s",
-        },
         .zio = .{
             .url = "git+https://github.com/lalinsky/zio?ref=v0.11.0#53abdf9ce5e6279e29703a39180ce1cedd8ac4ca",
             .hash = "zio-0.11.0-xHbVVEqQGwDz0MYoQ0j7Ke0Y9E_iZVe5eLAWK4gd9U0i",
+        },
+        .polyrole = .{
+            .url = "git+https://github.com/sdzx-1/polyrole.git#5c4f7cb527dc8d4098fd769a611678a79447546b",
+            .hash = "polyrole-0.0.0-zy5Boah7AABUWCLPGMBaoTfSO2ge2W0BC7pimfleZWX-",
         },
     },
     .paths = .{

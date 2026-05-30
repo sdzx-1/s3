@@ -2,8 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zio = @import("zio");
-const troupe = @import("troupe");
-const Data = troupe.Data;
+const polyrole = @import("polyrole");
+const Data = polyrole.Data;
 const acl = @import("acl.zig");
 
 const s3 = @import("s3.zig");
@@ -67,7 +67,7 @@ pub fn runServer(
     sw: switch (curr_id) {
         inline else => |state_id| {
             const Curr_State = Runner.StateFromId(state_id);
-            if (Curr_State == troupe.Exit) return;
+            if (Curr_State == polyrole.Exit) return;
             const info = comptime Curr_State.info;
             if (comptime info.sender == .server) {
                 // server send msg
@@ -142,7 +142,7 @@ pub fn runClient(
     sw: switch (curr_id) {
         inline else => |state_id| {
             const Curr_State = Runner.StateFromId(state_id);
-            if (Curr_State == troupe.Exit) return;
+            if (Curr_State == polyrole.Exit) return;
             const info = comptime Curr_State.info;
             if (comptime info.sender == .client) {
                 //client send msg
