@@ -231,6 +231,8 @@ pub const RouteStageError = union(enum) {
 pub const SumError = error{
     BodyTooShort,
     MetadataError,
+    InvalidRequest,
+    InvalidArgument,
 } ||
     Io.File.OpenError ||
     Io.Dir.OpenError ||
@@ -240,6 +242,7 @@ pub const SumError = error{
     Io.File.StatError ||
     Io.Reader.StreamError ||
     Io.Reader.LimitedAllocError ||
+    Io.Dir.DeleteDirError ||
     std.json.ParseError(std.json.Scanner) ||
     std.mem.Allocator.Error;
 
@@ -653,21 +656,18 @@ pub const Route = union(enum) {
             if (bucket.len == 0) {
                 ctx.api = .handleListBuckets;
                 zs3.handleListBuckets(ctx.io, ctx.data_dir, arena, &ctx.res) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleListBuckets");
                     ctx.s3_error = .{ .route = .{ .handleListBuckets = err } };
                     return .failed;
                 };
             } else if (key.len == 0) {
                 ctx.api = .handleListObjects;
                 zs3.handleListObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleListObjects");
                     ctx.s3_error = .{ .route = .{ .handleListObjects = err } };
                     return .failed;
                 };
             } else {
                 ctx.api = .handleGetObject;
                 zs3.handleGetObject(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleGetObject");
                     ctx.s3_error = .{ .route = .{ .handleGetObject = err } };
                     return .failed;
                 };
@@ -676,21 +676,18 @@ pub const Route = union(enum) {
             if (key.len == 0) {
                 ctx.api = .handleCreateBucket;
                 zs3.handleCreateBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleCreateBucket");
                     ctx.s3_error = .{ .route = .{ .handleCreateBucket = err } };
                     return .failed;
                 };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
                 ctx.api = .handleUploadPart;
                 zs3.handleUploadPart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key, ctx.content_length.?) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleUploadPart");
                     ctx.s3_error = .{ .route = .{ .handleUploadPart = err } };
                     return .failed;
                 };
             } else {
                 ctx.api = .handlePutObject;
                 zs3.handlePutObject(ctx.io, ctx.data_dir, ctx.id, ctx.tmp_dir, arena, &ctx.req, &ctx.res, bucket, key, ctx.content_length.?) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handlePutObject");
                     ctx.s3_error = .{ .route = .{ .handlePutObject = err } };
                     return .failed;
                 };
@@ -699,21 +696,18 @@ pub const Route = union(enum) {
             if (key.len == 0) {
                 ctx.api = .handleDeleteBucket;
                 zs3.handleDeleteBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteBucket");
                     ctx.s3_error = .{ .route = .{ .handleDeleteBucket = err } };
                     return .failed;
                 };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
                 ctx.api = .handleAbortMultipart;
                 zs3.handleAbortMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleAbortMultipart");
                     ctx.s3_error = .{ .route = .{ .handleAbortMultipart = err } };
                     return .failed;
                 };
             } else {
                 ctx.api = .handleDeleteObject;
                 zs3.handleDeleteObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteObject");
                     ctx.s3_error = .{ .route = .{ .handleDeleteObject = err } };
                     return .failed;
                 };
@@ -722,14 +716,12 @@ pub const Route = union(enum) {
             if (key.len == 0) {
                 ctx.api = .handleHeadBucket;
                 zs3.handleHeadBucket(ctx.io, ctx.data_dir, arena, &ctx.res, bucket) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleHeadBucket");
                     ctx.s3_error = .{ .route = .{ .handleHeadBucket = err } };
                     return .failed;
                 };
             } else {
                 ctx.api = .handleHeadObject;
                 zs3.handleHeadObject(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleHeadObject");
                     ctx.s3_error = .{ .route = .{ .handleHeadObject = err } };
                     return .failed;
                 };
@@ -738,21 +730,18 @@ pub const Route = union(enum) {
             if (zs3.hasQuery(ctx.req.query, "delete")) {
                 ctx.api = .handleDeleteObjects;
                 zs3.handleDeleteObjects(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleDeleteObjects");
                     ctx.s3_error = .{ .route = .{ .handleDeleteObjects = err } };
                     return .failed;
                 };
             } else if (zs3.hasQuery(ctx.req.query, "uploads")) {
                 ctx.api = .handleInitiateMultipart;
                 zs3.handleInitiateMultipart(ctx.io, ctx.data_dir, arena, &ctx.res, bucket, key) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleInitiateMultipart");
                     ctx.s3_error = .{ .route = .{ .handleInitiateMultipart = err } };
                     return .failed;
                 };
             } else if (zs3.hasQuery(ctx.req.query, "uploadId")) {
                 ctx.api = .handleCompleteMultipart;
                 zs3.handleCompleteMultipart(ctx.io, ctx.data_dir, arena, &ctx.req, &ctx.res, bucket, key) catch |err| {
-                    zs3.sendError(&ctx.res, 500, "InternalError", "handleCompleteMultipart");
                     ctx.s3_error = .{ .route = .{ .handleCompleteMultipart = err } };
                     return .failed;
                 };

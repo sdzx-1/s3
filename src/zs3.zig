@@ -16,6 +16,10 @@ pub const MAX_BUCKET_LENGTH = 63;
 pub const MAX_CONNECTIONS = 1024;
 pub const ERROR_403 = "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\nConnection: keep-alive\r\n\r\nDenied";
 
+pub fn allocPrint(gpa: std.mem.Allocator, comptime fmt: []const u8, args: anytype) []u8 {
+    return std.fmt.allocPrint(gpa, fmt, args) catch @panic("OOM");
+}
+
 /// Suffix appended to object files to store metadata sidecar.
 /// Objects with keys ending in this suffix are rejected at the route level.
 pub const META_SUFFIX = ".__s3_meta__";
@@ -465,7 +469,7 @@ pub fn sortQueryString(allocator: Allocator, query: []const u8) ![]const u8 {
         if (pair.len > 0) {
             // Normalize params without '=' to 'key=' format (required by SigV4)
             if (std.mem.indexOf(u8, pair, "=") == null) {
-                const norm = try std.fmt.allocPrint(allocator, "{s}=", .{pair});
+                const norm = allocPrint(allocator, "{s}=", .{pair});
                 try normalized.append(allocator, norm);
                 try pairs.append(allocator, norm);
             } else {
@@ -502,7 +506,7 @@ pub fn sendError(res: *Response, status: u16, code: []const u8, message: []const
     };
     res.setHeader("Content-Type", "application/xml");
 
-    res.body = std.fmt.allocPrint(res.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{s}</Code><Message>{s}</Message></Error>", .{ code, message }) catch return;
+    res.body = allocPrint(res.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{s}</Code><Message>{s}</Message></Error>", .{ code, message });
 }
 
 pub fn isValidBucketName(name: []const u8) bool {
@@ -555,7 +559,7 @@ pub fn handleCreateBucket(
         error.PathAlreadyExists => {},
         else => {
             sendError(res, 500, "InternalError", "Cannot create bucket");
-            return;
+            return err;
         },
     };
 
@@ -566,9 +570,9 @@ pub fn handleListBuckets(io: Io, data_dir: []const u8, allocator: Allocator, res
     const tracy_fun = trace(@src());
     defer tracy_fun.end();
 
-    var dir = Io.Dir.cwd().openDir(io, data_dir, .{ .iterate = true }) catch {
+    var dir = Io.Dir.cwd().openDir(io, data_dir, .{ .iterate = true }) catch |err| {
         sendError(res, 500, "InternalError", "Cannot open data dir");
-        return;
+        return err;
     };
     defer dir.close(io);
 
@@ -752,7 +756,7 @@ pub fn writeObjectMeta(
     meta_path: []const u8,
     meta: ObjectMetaData,
 ) !void {
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{meta_path});
+    const tmp_path = allocPrint(allocator, "{s}.tmp", .{meta_path});
     defer allocator.free(tmp_path);
 
     var file = try Io.Dir.cwd().createFile(io, tmp_path, .{});
@@ -794,7 +798,7 @@ fn collectKeys(io: Io, allocator: Allocator, base_path: []const u8, current_pref
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, META_SUFFIX)) continue;
 
         const full_key = if (current_prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current_prefix, entry.name })
+            allocPrint(allocator, "{s}/{s}", .{ current_prefix, entry.name })
         else
             try allocator.dupe(u8, entry.name);
 
@@ -854,9 +858,9 @@ pub fn handleListObjects(
     const continuation = if (continuation_raw) |c| try uriDecode(allocator, c) else null;
     defer if (continuation) |c| allocator.free(c);
 
-    var dir = Io.Dir.cwd().openDir(io, bucket_path, .{ .iterate = true }) catch {
+    var dir = Io.Dir.cwd().openDir(io, bucket_path, .{ .iterate = true }) catch |err| {
         sendError(res, 404, "NoSuchBucket", "Bucket not found");
-        return;
+        return err;
     };
     defer dir.close(io);
 
@@ -878,7 +882,10 @@ pub fn handleListObjects(
     var keys: std.ArrayListUnmanaged(KeyInfo) = .empty;
     defer keys.deinit(allocator);
 
-    try collectKeys(io, allocator, bucket_path, "", prefix, &keys);
+    collectKeys(io, allocator, bucket_path, "", prefix, &keys) catch |err| {
+        sendError(res, 500, "CollectKeysFailed", "Some error happened in collect keys");
+        return err;
+    };
 
     std.mem.sort(KeyInfo, keys.items, {}, struct {
         fn lessThan(_: void, a: KeyInfo, b: KeyInfo) bool {
@@ -975,10 +982,10 @@ pub fn objectPath(allocator: Allocator, data_dir: []const u8, bucket: []const u8
 }
 
 /// Heap-allocate an RFC 7231 date string suitable for Response.setHeader.
-fn allocHttpDate(allocator: Allocator, timestamp: i64) ![]const u8 {
+fn allocHttpDate(allocator: Allocator, timestamp: i64) []const u8 {
     var buf: [29]u8 = undefined;
     formatHttpDate(&buf, timestamp);
-    return allocator.dupe(u8, &buf);
+    return allocator.dupe(u8, &buf) catch unreachable;
 }
 
 /// Format a Unix timestamp (seconds) as an HTTP date (RFC 7231).
@@ -1048,7 +1055,7 @@ pub fn handleGetObject(
     defer tracy_fun.end();
 
     const effective_key = if (key.len > 0 and key[key.len - 1] == '/')
-        try std.fmt.allocPrint(allocator, "{s}.folder_marker", .{key})
+        allocPrint(allocator, "{s}.folder_marker", .{key})
     else
         try allocator.dupe(u8, key);
     defer allocator.free(effective_key);
@@ -1056,7 +1063,7 @@ pub fn handleGetObject(
     defer allocator.free(path);
 
     // Read metadata sidecar — mandatory, object without metadata is invalid
-    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    const meta_path = allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
     defer allocator.free(meta_path);
     const meta = readObjectMeta(io, allocator, meta_path) catch |err| switch (err) {
         else => {
@@ -1065,35 +1072,27 @@ pub fn handleGetObject(
         },
     };
 
-    var file = Io.Dir.cwd().openFile(io, path, .{}) catch {
+    var file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         sendError(res, 404, "NoSuchKey", "Object not found");
-        return;
+        return err;
     };
 
-    const stat = file.stat(io) catch {
+    const stat = file.stat(io) catch |err| {
         file.close(io);
         sendError(res, 500, "InternalError", "Stat failed");
-        return;
+        return err;
     };
 
-    const last_modified = allocHttpDate(allocator, meta.last_modified) catch {
-        file.close(io);
-        sendError(res, 500, "InternalError", "Date format failed");
-        return;
-    };
+    const last_modified = allocHttpDate(allocator, meta.last_modified);
 
-    const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
+    const etag = allocPrint(allocator, "\"{s}\"", .{meta.etag});
 
     // Handle range request — stream via sendFile
     if (req.header("range")) |range_header| {
         if (parseRange(range_header, stat.size)) |range| {
             const len = range.end - range.start + 1;
 
-            const content_range = std.fmt.allocPrint(allocator, "bytes {d}-{d}/{d}", .{ range.start, range.end, stat.size }) catch {
-                file.close(io);
-                sendError(res, 500, "InternalError", "Range format failed");
-                return;
-            };
+            const content_range = allocPrint(allocator, "bytes {d}-{d}/{d}", .{ range.start, range.end, stat.size });
 
             res.status = 206;
             res.status_text = "Partial Content";
@@ -1125,9 +1124,9 @@ pub fn handleHeadBucket(io: Io, data_dir: []const u8, allocator: Allocator, res:
     const path = try bucketPath(allocator, data_dir, bucket);
     defer allocator.free(path);
 
-    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch {
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch |err| {
         sendError(res, 404, "NoSuchBucket", "Bucket not found");
-        return;
+        return err;
     };
     dir.close(io);
 
@@ -1146,7 +1145,7 @@ pub fn handleHeadObject(
     defer tracy_fun.end();
 
     const effective_key = if (key.len > 0 and key[key.len - 1] == '/')
-        try std.fmt.allocPrint(allocator, "{s}.folder_marker", .{key})
+        allocPrint(allocator, "{s}.folder_marker", .{key})
     else
         try allocator.dupe(u8, key);
     defer allocator.free(effective_key);
@@ -1154,19 +1153,17 @@ pub fn handleHeadObject(
     defer allocator.free(path);
 
     // Try reading metadata sidecar first — avoids reading the entire file for ETag
-    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    const meta_path = allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
     defer allocator.free(meta_path);
-    const meta = try readObjectMeta(io, allocator, meta_path);
-    const last_modified = allocHttpDate(allocator, meta.last_modified) catch |err| {
-        sendError(res, 500, "InternalError", "Date format failed");
+    const meta = readObjectMeta(io, allocator, meta_path) catch |err| {
+        sendError(res, 404, "NoSuchKey", "Object metadata not found");
         return err;
     };
-    const len_str = std.fmt.allocPrint(allocator, "{d}", .{meta.size}) catch |err| {
-        sendError(res, 500, "InternalError", "Format failed");
-        return err;
-    };
+
+    const last_modified = allocHttpDate(allocator, meta.last_modified);
+    const len_str = allocPrint(allocator, "{d}", .{meta.size});
     // Add HTTP quotes around bare ETag stored in metadata
-    const etag = try std.fmt.allocPrint(allocator, "\"{s}\"", .{meta.etag});
+    const etag = allocPrint(allocator, "\"{s}\"", .{meta.etag});
     res.ok();
     res.setHeader("Content-Type", meta.content_type);
     res.setHeader("Content-Length", len_str);
@@ -1193,7 +1190,7 @@ pub fn handlePutObject(
 
     const dir_tmp = try Io.Dir.cwd().openDir(io, tmp_dir, .{});
     defer dir_tmp.close(io);
-    const tmp_file_path = try std.fmt.allocPrint(allocator, "{d}.data", .{id});
+    const tmp_file_path = allocPrint(allocator, "{d}.data", .{id});
     defer allocator.free(tmp_file_path);
 
     const tmp_file = try dir_tmp.createFile(io, tmp_file_path, .{});
@@ -1224,14 +1221,11 @@ pub fn handlePutObject(
 
     var hash: [16]u8 = undefined;
     hash_writer.hasher.final(&hash);
-    const etag = std.fmt.allocPrint(allocator, "\"{x}\"", .{&hash}) catch {
-        sendError(res, 500, "InternalError", "ETag failed");
-        return;
-    };
+    const etag = allocPrint(allocator, "\"{x}\"", .{&hash});
 
     // Keys ending with '/' are folder markers — store as ".folder_marker" file
     const effective_key = if (key.len > 0 and key[key.len - 1] == '/')
-        try std.fmt.allocPrint(allocator, "{s}.folder_marker", .{key})
+        allocPrint(allocator, "{s}.folder_marker", .{key})
     else
         try allocator.dupe(u8, key);
     defer allocator.free(effective_key);
@@ -1240,13 +1234,19 @@ pub fn handlePutObject(
     defer allocator.free(path);
 
     if (Io.Dir.path.dirname(path)) |dir| {
-        try Io.Dir.cwd().createDirPath(io, dir);
+        Io.Dir.cwd().createDirPath(io, dir) catch |err| {
+            sendError(res, 500, "CreateDirFailed", "");
+            return err;
+        };
     }
 
-    try dir_tmp.rename(tmp_file_path, Io.Dir.cwd(), path, io);
+    dir_tmp.rename(tmp_file_path, Io.Dir.cwd(), path, io) catch |err| {
+        sendError(res, 500, "FailedToRenameObject", "");
+        return err;
+    };
 
     // Write metadata sidecar
-    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
+    const meta_path = allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
     defer allocator.free(meta_path);
 
     const content_type = req.header("content-type") orelse "binary/octet-stream";
@@ -1266,7 +1266,8 @@ pub fn handlePutObject(
         .last_modified = last_modified,
         .size = std.fmt.parseInt(u64, req.header("content-length") orelse "0", 10) catch 0,
     }) catch |err| {
-        std.log.warn("Failed to write metadata for {s}: {}", .{ key, err });
+        sendError(res, 500, "FailedToWriteMetadata", "");
+        return err;
     };
 
     res.ok();
@@ -1290,13 +1291,16 @@ pub fn handleDeleteBucket(
     Io.Dir.cwd().deleteDir(io, path) catch |err| switch (err) {
         error.DirNotEmpty => {
             sendError(res, 409, "BucketNotEmpty", "Bucket is not empty");
-            return;
+            return err;
         },
         error.FileNotFound => {
             sendError(res, 404, "NoSuchBucket", "Bucket does not exist");
-            return;
+            return err;
         },
-        else => std.log.warn("delete bucket failed: {}", .{err}),
+        else => {
+            sendError(res, 500, "DeleteBucketFailed", "");
+            return err;
+        },
     };
 
     res.noContent();
@@ -1307,30 +1311,30 @@ pub fn handleDeleteObject(io: Io, data_dir: []const u8, allocator: Allocator, re
     defer tracy_fun.end();
 
     const effective_key = if (key.len > 0 and key[key.len - 1] == '/')
-        try std.fmt.allocPrint(allocator, "{s}.folder_marker", .{key})
+        allocPrint(allocator, "{s}.folder_marker", .{key})
     else
         try allocator.dupe(u8, key);
     defer allocator.free(effective_key);
     const path = try objectPath(allocator, data_dir, bucket, effective_key);
     defer allocator.free(path);
 
-    deleteObjectInternal(io, data_dir, allocator, bucket, path);
+    deleteObjectInternal(io, data_dir, allocator, bucket, path) catch |err| switch (err) {
+        error.FileNotFound => return {},
+        else => return {
+            sendError(res, 500, "DeletcObjError", "");
+            return err;
+        },
+    };
     res.noContent();
 }
 
-fn deleteObjectInternal(io: Io, data_dir: []const u8, allocator: Allocator, bucket: []const u8, path: []const u8) void {
-    Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => std.log.warn("delete failed: {}", .{err}),
-    };
+fn deleteObjectInternal(io: Io, data_dir: []const u8, allocator: Allocator, bucket: []const u8, path: []const u8) !void {
+    try Io.Dir.cwd().deleteFile(io, path);
 
     // Delete metadata sidecar if it exists
-    const meta_path = std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path}) catch return;
+    const meta_path = allocPrint(allocator, "{s}" ++ META_SUFFIX, .{path});
     defer allocator.free(meta_path);
-    Io.Dir.cwd().deleteFile(io, meta_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => std.log.warn("failed to delete metadata: {}", .{err}),
-    };
+    try Io.Dir.cwd().deleteFile(io, meta_path);
 
     // Clean up empty parent directories up to bucket level
     const bucket_path = bucketPath(allocator, data_dir, bucket) catch return;
@@ -1339,6 +1343,7 @@ fn deleteObjectInternal(io: Io, data_dir: []const u8, allocator: Allocator, buck
     var dir_path = std.fs.path.dirname(path);
     while (dir_path) |dp| {
         if (dp.len <= bucket_path.len) break;
+        //delete emtpy dir, else break
         Io.Dir.cwd().deleteDir(io, dp) catch break;
         dir_path = std.fs.path.dirname(dp);
     }
@@ -1358,21 +1363,19 @@ pub fn handleAbortMultipart(io: Io, data_dir: []const u8, allocator: Allocator, 
 
     const upload_id = getQueryParam(req.query, "uploadId") orelse {
         sendError(res, 400, "InvalidRequest", "Missing uploadId");
-        return;
+        return error.InvalidRequest;
     };
     if (!isValidUploadId(upload_id)) {
         sendError(res, 400, "InvalidArgument", "Invalid uploadId");
-        return;
+        return error.InvalidArgument;
     }
 
-    const parts_dir = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id }) catch {
-        sendError(res, 500, "InternalError", "Allocation failed");
-        return;
-    };
+    const parts_dir = allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id });
     defer allocator.free(parts_dir);
 
     Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        std.log.warn("abort multipart cleanup failed: {}", .{err});
+        sendError(res, 500, "AbortMultipartCleanupFailed", "");
+        return err;
     };
 
     res.noContent();
@@ -1390,9 +1393,9 @@ pub fn handleDeleteObjects(io: Io, data_dir: []const u8, allocator: Allocator, r
     try xml.appendSlice(allocator, "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
 
     // Simple XML parsing - find all <Key>...</Key> pairs
-    var body = req.body.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch {
+    var body = req.body.allocRemaining(allocator, .limited(MAX_BODY_SIZE)) catch |err| {
         sendError(res, 400, "InvalidBody", "Recv File Error");
-        return;
+        return err;
     };
 
     while (std.mem.indexOf(u8, body, "<Key>")) |start| {
@@ -1404,7 +1407,7 @@ pub fn handleDeleteObjects(io: Io, data_dir: []const u8, allocator: Allocator, r
             const path = objectPath(allocator, data_dir, bucket, key) catch continue;
             defer allocator.free(path);
 
-            deleteObjectInternal(io, data_dir, allocator, bucket, path);
+            deleteObjectInternal(io, data_dir, allocator, bucket, path) catch {};
 
             try xml.appendSlice(allocator, "<Deleted><Key>");
             try xmlEscape(allocator, &xml, key);
@@ -1426,7 +1429,7 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     if (isReservedKey(key)) {
         sendError(res, 400, "InvalidArgument", "Key uses reserved suffix");
-        return;
+        return error.InvalidArgument;
     }
 
     // Generate unique upload ID using timestamp + random bytes to prevent collision
@@ -1437,16 +1440,22 @@ pub fn handleInitiateMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     var upload_id_buf: [32]u8 = undefined;
     const upload_id = std.fmt.bufPrint(&upload_id_buf, "{x}{x}", .{ timestamp, random_suffix }) catch unreachable;
 
-    const parts_dir = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id }) catch return;
+    const parts_dir = allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id });
     defer allocator.free(parts_dir);
-    try Io.Dir.cwd().createDirPath(io, parts_dir);
+    Io.Dir.cwd().createDirPath(io, parts_dir) catch |err| {
+        sendError(res, 500, "CreateDirPathFailed", "");
+        return err;
+    };
 
-    const meta_path = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}/.meta", .{ data_dir, upload_id }) catch return;
+    const meta_path = allocPrint(allocator, "{s}/.uploads/{s}/.meta", .{ data_dir, upload_id });
     defer allocator.free(meta_path);
 
-    var meta_file = Io.Dir.cwd().createFile(io, meta_path, .{}) catch return;
+    var meta_file = Io.Dir.cwd().createFile(io, meta_path, .{}) catch |err| {
+        sendError(res, 500, "CreateMetadataFailed", "");
+        return err;
+    };
     defer meta_file.close(io);
-    const meta_content = std.fmt.allocPrint(allocator, "{s}\n{s}", .{ bucket, key }) catch return;
+    const meta_content = allocPrint(allocator, "{s}\n{s}", .{ bucket, key });
     defer allocator.free(meta_content);
 
     var writer = meta_file.writer(io, &.{});
@@ -1475,17 +1484,14 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     const upload_id = getQueryParam(req.query, "uploadId") orelse {
         sendError(res, 400, "InvalidRequest", "Missing uploadId");
-        return;
+        return error.InvalidRequest;
     };
     if (!isValidUploadId(upload_id)) {
         sendError(res, 400, "InvalidArgument", "Invalid uploadId");
-        return;
+        return error.InvalidArgument;
     }
 
-    const parts_dir = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id }) catch {
-        sendError(res, 500, "InternalError", "Allocation failed");
-        return;
-    };
+    const parts_dir = allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id });
     defer allocator.free(parts_dir);
 
     const final_path = try objectPath(allocator, data_dir, bucket, key);
@@ -1493,13 +1499,14 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
 
     if (std.fs.path.dirname(final_path)) |dir| {
         Io.Dir.cwd().createDirPath(io, dir) catch |err| {
-            std.log.warn("makePath failed: {}", .{err});
+            sendError(res, 500, "CreateDirPathFailed", "");
+            return err;
         };
     }
 
-    var final_file = Io.Dir.cwd().createFile(io, final_path, .{}) catch {
+    var final_file = Io.Dir.cwd().createFile(io, final_path, .{}) catch |err| {
         sendError(res, 500, "InternalError", "Cannot create final file");
-        return;
+        return err;
     };
     // Note: no defer close — we close explicitly after assembly
 
@@ -1509,9 +1516,9 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     var hash_writer = Io.Writer.hashed(&final_file_writer.interface, std.crypto.hash.Md5.init(.{}), &hash_buf);
     const writer = &hash_writer.writer;
 
-    var dir = Io.Dir.cwd().openDir(io, parts_dir, .{ .iterate = true }) catch {
+    var dir = Io.Dir.cwd().openDir(io, parts_dir, .{ .iterate = true }) catch |err| {
         sendError(res, 404, "NoSuchUpload", "Upload not found");
-        return;
+        return err;
     };
     defer dir.close(io);
 
@@ -1534,15 +1541,12 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     for (parts.items) |part_num| {
         var part_num_buf: [16]u8 = undefined;
         const part_num_str = std.fmt.bufPrint(&part_num_buf, "{d}", .{part_num}) catch continue;
-        const part_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ parts_dir, part_num_str }) catch {
-            std.log.warn("allocation failed for part path", .{});
-            continue;
-        };
+        const part_path = allocPrint(allocator, "{s}/{s}", .{ parts_dir, part_num_str });
         defer allocator.free(part_path);
 
         var part_file = Io.Dir.cwd().openFile(io, part_path, .{}) catch |err| {
-            std.log.warn("failed to open part {d}: {}", .{ part_num, err });
-            continue;
+            sendError(res, 500, "FailedToOpenPart", "");
+            return err;
         };
         defer part_file.close(io);
 
@@ -1555,14 +1559,14 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
                 error.EndOfStream => break,
                 else => {
                     sendError(res, 500, "InternalError", "Cannot write part");
-                    return;
+                    return err;
                 },
             };
         }
 
-        hash_writer.writer.flush() catch {
+        hash_writer.writer.flush() catch |err| {
             sendError(res, 500, "InternalError", "Cannot write part");
-            return;
+            return err;
         };
 
         var part_hash: [16]u8 = undefined;
@@ -1575,17 +1579,15 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     final_file.close(io);
 
     Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        std.log.warn("failed to cleanup upload dir: {}", .{err});
+        sendError(res, 500, "FailedToCleanupUploadDir", "");
+        return err;
     };
 
     var final_hash: [16]u8 = undefined;
     hasher.final(&final_hash);
 
     // Build etag value for both XML and metadata
-    const etag_value = std.fmt.allocPrint(allocator, "\"{x}-{d}\"", .{ final_hash, parts_assembled }) catch {
-        sendError(res, 500, "InternalError", "ETag failed");
-        return;
-    };
+    const etag_value = allocPrint(allocator, "\"{x}-{d}\"", .{ final_hash, parts_assembled });
     defer allocator.free(etag_value);
 
     // Strip HTTP quotes for JSON-safe metadata storage
@@ -1595,13 +1597,13 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
         etag_value;
 
     // Stat the assembled file for metadata
-    const assembled_stat = Io.Dir.cwd().statFile(io, final_path, .{}) catch {
+    const assembled_stat = Io.Dir.cwd().statFile(io, final_path, .{}) catch |err| {
         sendError(res, 500, "InternalError", "Stat failed");
-        return;
+        return err;
     };
 
     // Write metadata sidecar
-    const meta_path = try std.fmt.allocPrint(allocator, "{s}" ++ META_SUFFIX, .{final_path});
+    const meta_path = allocPrint(allocator, "{s}" ++ META_SUFFIX, .{final_path});
     defer allocator.free(meta_path);
     writeObjectMeta(io, allocator, meta_path, .{
         .content_type = "binary/octet-stream",
@@ -1610,7 +1612,8 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
         .last_modified = @intCast(@divFloor(Io.Timestamp.now(io, .real).toSeconds(), 1)),
         .size = assembled_stat.size,
     }) catch |err| {
-        std.log.warn("Failed to write metadata for multipart upload: {}", .{err});
+        sendError(res, 500, "WriteMetadataFailed", allocPrint(allocator, "Failed to write metadata for multipart upload: {}", .{err}));
+        return err;
     };
 
     var xml: std.ArrayListUnmanaged(u8) = .empty;
@@ -1650,27 +1653,27 @@ pub fn handleUploadPart(
 
     const upload_id = getQueryParam(req.query, "uploadId") orelse {
         sendError(res, 400, "InvalidRequest", "Missing uploadId");
-        return;
+        return error.InvalidRequest;
     };
     if (!isValidUploadId(upload_id)) {
         sendError(res, 400, "InvalidArgument", "Invalid uploadId");
-        return;
+        return error.InvalidArgument;
     }
     const part_number = getQueryParam(req.query, "partNumber") orelse {
         sendError(res, 400, "InvalidRequest", "Missing partNumber");
-        return;
+        return error.InvalidRequest;
     };
     _ = std.fmt.parseInt(u32, part_number, 10) catch {
         sendError(res, 400, "InvalidArgument", "Invalid partNumber");
-        return;
+        return error.InvalidArgument;
     };
 
-    const part_path = std.fmt.allocPrint(allocator, "{s}/.uploads/{s}/{s}", .{ data_dir, upload_id, part_number }) catch return;
+    const part_path = allocPrint(allocator, "{s}/.uploads/{s}/{s}", .{ data_dir, upload_id, part_number });
     defer allocator.free(part_path);
 
-    var file = Io.Dir.cwd().createFile(io, part_path, .{}) catch {
+    var file = Io.Dir.cwd().createFile(io, part_path, .{}) catch |err| {
         sendError(res, 500, "InternalError", "Cannot create part file");
-        return;
+        return err;
     };
     defer file.close(io);
 
@@ -1691,13 +1694,13 @@ pub fn handleUploadPart(
         total += n;
     }
     if (total != content_length) return error.BodyTooShort;
-    hash_writer.writer.flush() catch {
+    hash_writer.writer.flush() catch |err| {
         sendError(res, 500, "InternalError", "Cannot write part");
-        return;
+        return err;
     };
     var out: [32]u8 = undefined;
     hash_writer.hasher.final(&out);
-    const etag = try std.fmt.allocPrint(allocator, "\"{x}\"", .{out});
+    const etag = allocPrint(allocator, "\"{x}\"", .{out});
 
     res.ok();
     res.setHeader("ETag", etag);
