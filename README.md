@@ -2,9 +2,7 @@
 
 S3-compatible storage of Zig.
 
-## What it does
-
-**Standalone Mode:**
+## Supported capabilities
 - Full AWS SigV4 authentication (works with aws-cli, boto3, any SDK)
 - PUT, GET, DELETE, HEAD, LIST (v2)
 - HeadBucket for bucket existence checks
@@ -13,8 +11,7 @@ S3-compatible storage of Zig.
 - Range requests for streaming/seeking (RFC 7233 compliant suffix ranges)
 - HTTP 100-continue support (boto3 compatible)
 
-## What it doesn't do
-
+## Capabilities under development
 - Versioning, lifecycle policies, bucket ACLs
 - Pre-signed URLs, object tagging, encryption
 
@@ -82,7 +79,7 @@ print(s3.get_object(Bucket='test', Key='hello.txt')['Body'].read())
 
 **Storage is just files.** `mybucket/folder/file.txt` is literally `./data/mybucket/folder/file.txt`. You can `ls` your buckets. You can `cp` files in. It just works.
 
-**Zig makes this easy.** No runtime, no GC, no hidden allocations, no surprise dependencies. The binary is just the code + syscalls.
+**Zig makes this easy.** No runtime, no GC, no hidden allocations, no surprise dependencies. 
 
 ## When to use this
 
@@ -91,6 +88,7 @@ print(s3.get_object(Bucket='test', Key='hello.txt')['Body'].read())
 - Self-hosted backups
 - Embedded/appliance storage
 - Learning how S3 actually works
+- Learning polyrole
 
 ## When NOT to use this
 
@@ -137,8 +135,8 @@ Requires `pip install boto3` for comprehensive tests.
 - Query parameter boundary checking (no substring false positives)
 - Request size limits (8KB headers, 5GB body, 1024-byte keys)
 - No shell commands, no eval, no external network calls
-- Runtime safety checks enabled on all network-facing code
-- Single file, easy to audit
 
 TLS not included. Use a reverse proxy (nginx, caddy) for HTTPS.
 
+## api document
+[api](api.md)
