@@ -566,7 +566,7 @@ pub fn handleCreateBucket(
     res.ok();
 }
 
-pub fn handleListBuckets(io: Io, data_dir: []const u8, allocator: Allocator, res: *Response) !void {
+pub fn handleListBuckets(io: Io, data_dir: []const u8, allocator: Allocator, res: *Response, owner_id: []const u8) !void {
     const tracy_fun = trace(@src());
     defer tracy_fun.end();
 
@@ -581,7 +581,11 @@ pub fn handleListBuckets(io: Io, data_dir: []const u8, allocator: Allocator, res
 
     try xml.appendSlice(allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     try xml.appendSlice(allocator, "<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
-    try xml.appendSlice(allocator, "<Owner><ID>minioadmin</ID><DisplayName>minioadmin</DisplayName></Owner>");
+    try xml.appendSlice(allocator, "<Owner><ID>");
+    try xml.appendSlice(allocator, owner_id);
+    try xml.appendSlice(allocator, "</ID><DisplayName>");
+    try xml.appendSlice(allocator, owner_id);
+    try xml.appendSlice(allocator, "</DisplayName></Owner>");
     try xml.appendSlice(allocator, "<Buckets>");
 
     var iter = dir.iterate();

@@ -655,7 +655,7 @@ pub const Route = union(enum) {
         if (std.mem.eql(u8, ctx.req.method, "GET")) {
             if (bucket.len == 0) {
                 ctx.api = .handleListBuckets;
-                zs3.handleListBuckets(ctx.io, ctx.data_dir, arena, &ctx.res) catch |err| {
+                zs3.handleListBuckets(ctx.io, ctx.data_dir, arena, &ctx.res, ctx.credential.access_key) catch |err| {
                     ctx.s3_error = .{ .route = .{ .handleListBuckets = err } };
                     return .failed;
                 };
