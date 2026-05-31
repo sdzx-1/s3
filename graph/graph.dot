@@ -1,0 +1,37 @@
+digraph fsm_state_graph {
+  subgraph cluster_transitions {
+    label = "State Transitions";
+    subgraph cluster_fsm_0 {
+      label = "polyrole_exit";
+      6[shape=rect,  label="[6] Exit", color = "cyan"];
+    }
+    subgraph cluster_fsm_1 {
+      label = "s3: { .client, .server }";
+      0[shape=rect,  label=" c [0] Start .client -> { .server }", color = "red"];
+      1[shape=rect,  label=" S [1] ServerLookupCredential .server -> { .client }", color = "green"];
+      2[shape=rect,  label=" c [2] SigV4 .client -> { .server }", color = "blue"];
+      3[shape=rect,  label=" c [3] Route .client -> { .server }", color = "brown"];
+      4[shape=rect,  label=" c [4] Send .client -> { .server }", color = "navy"];
+      5[shape=rect,  label=" S [5] Success .server -> { .client }", color = "teal"];
+      7[shape=rect,  label=" S [7] Error .server -> { .client }", color = "magenta"];
+      8[shape=rect,  label=" c [8] Send .client -> { .server }", color = "darkred"];
+      9[shape=rect,  label=" S [9] WaitServer .server -> { .client }", color = "darkgreen"];
+    }
+    0 -> 1 [label = "req_credential_and_id", color = "red", fontcolor = "red"];
+    0 -> 8 [label = "failed", color = "red", fontcolor = "red"];
+    0 -> 9 [label = "get_metrics", color = "red", fontcolor = "red"];
+    1 -> 2 [label = "ok", color = "green", fontcolor = "green"];
+    1 -> 8 [label = "no_access_key", color = "green", fontcolor = "green"];
+    2 -> 3 [label = "ok", color = "blue", fontcolor = "blue"];
+    2 -> 8 [label = "failed", color = "blue", fontcolor = "blue"];
+    3 -> 4 [label = "ok", color = "brown", fontcolor = "brown"];
+    3 -> 8 [label = "failed", color = "brown", fontcolor = "brown"];
+    4 -> 5 [label = "finish", color = "navy", fontcolor = "navy"];
+    4 -> 7 [label = "failed", color = "navy", fontcolor = "navy"];
+    5 -> 6 [label = "exit", color = "teal", fontcolor = "teal"];
+    7 -> 6 [label = "exit", color = "magenta", fontcolor = "magenta"];
+    8 -> 7 [label = "finish", color = "darkred", fontcolor = "darkred"];
+    8 -> 7 [label = "failed", color = "darkred", fontcolor = "darkred"];
+    9 -> 4 [label = "notify", color = "darkgreen", fontcolor = "darkgreen"];
+  }
+}

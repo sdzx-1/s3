@@ -81,6 +81,43 @@ print(s3.get_object(Bucket='test', Key='hello.txt')['Body'].read())
 
 **Zig makes this easy.** No runtime, no GC, no hidden allocations, no surprise dependencies. 
 
+## Design
+
+Every S3 request is split into two halves, **A** and **B**:
+
+- **A (Server):** lightweight operations that need consistency guarantees — access key
+  lookups, global counter increments, metrics updates, log writes. All of **A runs
+  sequentially** in a single thread.
+- **B (Client):** heavy disk I/O and CPU work — HTTP header parsing, SigV4 HMAC
+  computation, file reads/writes, request routing, response serialization. All of
+  **B runs concurrently** across a pool of zio coroutines.
+
+Under load this forms a "set of A" and a "set of B". Serializing A and parallelising
+B yields the best throughput.
+
+To achieve this, [polyrole](https://github.com/sdzx-1/polyrole) describes the full lifecycle of an S3 request as a typed
+state machine. The A set executes in one OS thread; the B set executes across [zio](https://github.com/lalinsky/zio)'s
+coroutine pool.
+
+**Communication between A and B:**
+- B → A: a bounded `MsgChannel` queue (capacity 1000)
+- A → B: a `WaitMsg` struct written directly into B's `ClientContext`, signalled
+  via `ResetEvent`
+
+The full A–B protocol is the state machine visualised:
+
+![graph](./graph/graph.svg)
+
+This pattern mirrors the **Erlang client-server model**: the server (A) is passive,
+the client (B) sends messages and waits for replies.
+
+**Pointer-based communication.** A and B pass `*ClientContext` pointers, so the
+per-message cost is essentially one `ResetEvent` syscall — no copies, no
+serialisation. Polyrole guarantees at compile-time that A never accesses B's
+pointer after B has exited, making this safe without runtime checks.
+
+> The bulk of the B-side code is derived from [zs3](https://github.com/Lulzx/zs3).
+
 ## When to use this
 
 - Local dev (replacing localstack/minio)

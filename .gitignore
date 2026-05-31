@@ -3,7 +3,6 @@ zig-out/
 *.o
 zig-pkg/
 build/
-*.dot
-*.svg
+.core.md
 data/
 tmp/
