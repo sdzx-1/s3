@@ -19,7 +19,6 @@ pub fn main(init: std.process.Init) !void {
     var port: u16 = 9000;
     var data_dir: []const u8 = "data";
     var tmp_dir: []const u8 = "tmp";
-    var log_file: []const u8 = ".s3.log";
     var raw_acl_list: []const u8 = "admin:minioadmin:minioadmin";
     var show_help: bool = false;
     var executor_threads: u6 = 4;
@@ -31,8 +30,6 @@ pub fn main(init: std.process.Init) !void {
             data_dir = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--tmp-dir=")) {
             tmp_dir = arg[10..];
-        } else if (std.mem.startsWith(u8, arg, "--log-file=")) {
-            log_file = arg[11..];
         } else if (std.mem.startsWith(u8, arg, "--zio-threads=")) {
             executor_threads = std.fmt.parseInt(u6, arg[14..], 10) catch |err| {
                 std.log.err("Invalid threads: {t}", .{err});
@@ -87,9 +84,6 @@ pub fn main(init: std.process.Init) !void {
             \\  --tmp-dir={s}
             \\      The directory to store tmp object data
             \\
-            \\  --log-file={s}
-            \\      The s3 log file
-            \\
             \\  --acl={s}
             \\      The credentials for access
             \\
@@ -99,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
             \\  --help, -h
             \\      Show this help
             \\
-        , .{ port, executor_threads, data_dir, tmp_dir, log_file, raw_acl_list });
+        , .{ port, executor_threads, data_dir, tmp_dir, raw_acl_list });
         return;
     }
 
@@ -161,7 +155,26 @@ pub fn main(init: std.process.Init) !void {
     const buffer1 = try gpa.alloc(*s3.ClientContext, 1000);
     var clean_channel: run.CleanChannel = .init(buffer1);
 
-    const file_log = Io.Dir.cwd().createFile(io, log_file, .{}) catch |err| {
+    const log_dir = Io.Dir.cwd().openDir(io, "log", .{}) catch |err| blk: switch (err) {
+        error.FileNotFound => {
+            Io.Dir.cwd().createDir(io, "log", .default_dir) catch |err1| {
+                std.log.err("Can't create log dir: {t}", .{err1});
+                return err;
+            };
+            break :blk Io.Dir.cwd().openDir(io, "log", .{}) catch unreachable;
+        },
+        else => {
+            std.log.err("Can't open log dir: {t}", .{err});
+            return err;
+        },
+    };
+
+    var time_buf: [20]u8 = undefined;
+    zs3.formatIso8601(&time_buf, Io.Timestamp.now(io, .real).toSeconds());
+    const log_file = try std.fmt.allocPrint(gpa, "{s}.log", .{&time_buf});
+    defer gpa.free(log_file);
+
+    const file_log = log_dir.createFile(io, log_file, .{}) catch |err| {
         std.log.err("Can't create log file: {s}", .{log_file});
         return err;
     };
