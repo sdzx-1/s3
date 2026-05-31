@@ -2,6 +2,8 @@
 
 S3-compatible storage of Zig.
 
+> Thanks to the [zs3](https://github.com/Lulzx/zs3) project — some code and documentation originates from it.
+
 ## Supported capabilities
 - Full AWS SigV4 authentication (works with aws-cli, boto3, any SDK)
 - PUT, GET, DELETE, HEAD, LIST (v2)
