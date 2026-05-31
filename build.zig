@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "source_version", git_head);
 
     const exe = b.addExecutable(.{
-        .name = "s3",
+        .name = "z3",
         .use_llvm = true, //arch sframe bug: https://codeberg.org/ziglang/zig/issues/30959
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),

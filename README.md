@@ -1,4 +1,4 @@
-# s3
+# z3
 
 S3-compatible storage of Zig.
 

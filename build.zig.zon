@@ -1,7 +1,7 @@
 .{
-    .name = .s3,
+    .name = .z3,
     .version = "0.0.0",
-    .fingerprint = 0xfa1b59dcffb443dc,
+    .fingerprint = 0x2bd9e2952942caac,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zio = .{
