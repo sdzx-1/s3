@@ -119,15 +119,47 @@ jobs:
           exit 1
 
       - name: Run test_client.py
-        run: python3 test_client.py
+        id: test-client
+        continue-on-error: true
+        run: |
+          python3 test_client.py
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
 
       - name: Run test_comprehensive.py
-        run: python3 test_comprehensive.py
+        id: test-comprehensive
+        continue-on-error: true
+        run: |
+          python3 test_comprehensive.py
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
 
       - name: Run benchmark.py (smoke test)
+        id: benchmark
+        continue-on-error: true
         run: |
           python3 benchmark.py \
             --only=zs3 \
+            --iterations=10 \
+            --concurrency=10 \
+            --requests-per-worker=5 \
+            --mode=sequential
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Report test results
+        if: always()
+        run: |
+          echo "::group::Test Summary"
+          echo "test_client:        exit ${{ steps.test-client.outputs.exit }}"
+          echo "test_comprehensive: exit ${{ steps.test-comprehensive.outputs.exit }}"
+          echo "benchmark:          exit ${{ steps.benchmark.outputs.exit }}"
+          echo "::endgroup::"
+
+          if [ "${{ steps.test-client.outputs.exit }}" != "0" ] || \
+             [ "${{ steps.test-comprehensive.outputs.exit }}" != "0" ] || \
+             [ "${{ steps.benchmark.outputs.exit }}" != "0" ]; then
+            echo "::error::One or more test suites failed"
+            exit 1
+          fi
+          echo "All test suites passed"
 
       - name: Stop z3 server
         if: always()
