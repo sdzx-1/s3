@@ -62,13 +62,10 @@ jobs:
           SHA=$(jq -r --arg v "$VERSION" --arg k "$ZIG_KEY" '.[$v][$k].shasum // empty' /tmp/zig-index.json)
 
           if [ -z "$URL" ]; then
-            echo "::notice::Zig $VERSION not in index.json — falling back to master"
-            URL=$(jq -r --arg k "$ZIG_KEY" '.master[$k].tarball' /tmp/zig-index.json)
-            SHA=$(jq -r --arg k "$ZIG_KEY" '.master[$k].shasum' /tmp/zig-index.json)
-            RESOLVED_VER=$(jq -r '.master.version' /tmp/zig-index.json)
-          else
-            RESOLVED_VER="$VERSION"
+            echo "::error::Zig $VERSION not found in index.json for $ZIG_KEY"
+            exit 1
           fi
+          RESOLVED_VER="$VERSION"
 
           echo "url=$URL"               >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA"            >> "$GITHUB_OUTPUT"
