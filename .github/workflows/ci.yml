@@ -15,79 +15,54 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            backend: epoll
-          - os: ubuntu-latest
-            backend: io_uring
-          # - os: macos-latest
-          #   backend: kqueue
-    name: ${{ matrix.os }} / ${{ matrix.backend }}
-    runs-on: ${{ matrix.os }}
+        backend: [epoll, io_uring]
+    name: build-and-test (${{ matrix.backend }})
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set Zig version
-        id: zig
-        run: echo "required=0.16.0" >> "$GITHUB_OUTPUT"
-
       - name: Resolve Zig URL
         id: zig-resolve
-        shell: bash
         run: |
-          VERSION="${{ steps.zig.outputs.required }}"
-
-          # Map runner arch / OS to ziglang.org index.json keys
-          case "${{ runner.arch }}" in
-            X64)   ZIG_ARCH="x86_64" ;;
-            ARM64) ZIG_ARCH="aarch64" ;;
-          esac
-          case "${{ runner.os }}" in
-            Linux)   ZIG_OS="linux";   ZIG_EXT="tar.xz" ;;
-            macOS)   ZIG_OS="macos";   ZIG_EXT="tar.xz" ;;
-          esac
-          ZIG_KEY="${ZIG_ARCH}-${ZIG_OS}"
+          VERSION="0.16.0"
+          ARCH="x86_64"
+          OS="linux"
 
           curl -sL https://ziglang.org/download/index.json > /tmp/zig-index.json
 
-          URL=$(jq -r --arg v "$VERSION" --arg k "$ZIG_KEY" '.[$v][$k].tarball // empty' /tmp/zig-index.json)
-          SHA=$(jq -r --arg v "$VERSION" --arg k "$ZIG_KEY" '.[$v][$k].shasum // empty' /tmp/zig-index.json)
+          URL=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".tarball // empty' /tmp/zig-index.json)
+          SHA=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".shasum // empty' /tmp/zig-index.json)
 
           if [ -z "$URL" ]; then
-            echo "::error::Zig $VERSION not found in index.json for $ZIG_KEY"
+            echo "::error::Zig $VERSION not found in index.json"
             exit 1
           fi
-          RESOLVED_VER="$VERSION"
 
-          echo "url=$URL"               >> "$GITHUB_OUTPUT"
-          echo "sha256=$SHA"            >> "$GITHUB_OUTPUT"
-          echo "resolved=$RESOLVED_VER" >> "$GITHUB_OUTPUT"
-          echo "ext=$ZIG_EXT"           >> "$GITHUB_OUTPUT"
-          echo "Installing Zig $RESOLVED_VER from $URL"
+          echo "url=$URL"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Installing Zig $VERSION from $URL"
 
       - name: Cache Zig
         id: cache-zig
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.local/share/zig
-          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig-resolve.outputs.resolved }}
+          key: zig-${{ runner.os }}-${{ runner.arch }}-0.16.0
 
       - name: Install Zig
         if: steps.cache-zig.outputs.cache-hit != 'true'
-        shell: bash
         run: |
           set -eu
-          URL="${{ steps.zig-resolve.outputs.url }}"
+          ZIG_URL="${{ steps.zig-resolve.outputs.url }}"
           EXPECTED_SHA="${{ steps.zig-resolve.outputs.sha256 }}"
-          EXT="${{ steps.zig-resolve.outputs.ext }}"
           ZIG_ROOT="$HOME/.local/share/zig"
-          DOWNLOAD="${{ runner.temp }}/zig-download"
+          TARBALL="/tmp/zig.tar.xz"
 
-          curl -fsSL "$URL" -o "$DOWNLOAD"
+          curl -fsSL "$ZIG_URL" -o "$TARBALL"
 
-          ACTUAL_SHA=$(sha256sum "$DOWNLOAD" | cut -d' ' -f1)
+          ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
           if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
             echo "::error::SHA-256 mismatch"
             exit 1
@@ -95,21 +70,10 @@ jobs:
           echo "SHA-256 OK"
 
           mkdir -p "$ZIG_ROOT"
-          case "$EXT" in
-            zip)
-              mkdir -p /tmp/zig-extract
-              unzip -q "$DOWNLOAD" -d /tmp/zig-extract
-              mv /tmp/zig-extract/*/* "$ZIG_ROOT"/
-              rm -rf /tmp/zig-extract
-              ;;
-            *)
-              tar -xf "$DOWNLOAD" -C "$ZIG_ROOT" --strip-components=1
-              ;;
-          esac
-          rm -f "$DOWNLOAD"
+          tar -xf "$TARBALL" -C "$ZIG_ROOT" --strip-components=1
+          rm -f "$TARBALL"
 
       - name: Add Zig to PATH
-        shell: bash
         run: echo "$HOME/.local/share/zig" >> "$GITHUB_PATH"
 
       - name: Setup Python
@@ -124,47 +88,23 @@ jobs:
         run: zig build -Doptimize=ReleaseFast -Dbackend=${{ matrix.backend }}
 
       - name: Create data and tmp directories
-        shell: bash
-        run: mkdir -p data tmp log
+        run: mkdir -p data tmp
 
       - name: Start z3 server
-        if: runner.os == 'Linux' || runner.os == 'macOS'
-        shell: bash
         run: |
-          ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp > /tmp/z3.stdout 2> /tmp/z3.stderr &
-          Z3_PID=$!
-          echo "$Z3_PID" > "${{ runner.temp }}/z3.pid"
-          sleep 2
-          if ! kill -0 "$Z3_PID" 2>/dev/null; then
-            echo "::error::z3 exited immediately (PID $Z3_PID)"
-            echo "--- stdout ---"; cat /tmp/z3.stdout
-            echo "--- stderr ---"; cat /tmp/z3.stderr
-            exit 1
-          fi
-          echo "z3 running (PID $Z3_PID)"
+          ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp &
+          echo $! > ${{ runner.temp }}/z3.pid
 
       - name: Wait for server
-        shell: bash
         run: |
           for i in $(seq 1 30); do
             if curl -sf -o /dev/null -w '%{http_code}' http://localhost:9000/ 2>/dev/null | grep -q '200\|403'; then
-              echo "Server ready (attempt $i)"
+              echo "Server is ready (attempt $i)"
               exit 0
             fi
             sleep 1
           done
           echo "::error::Server failed to start"
-          echo "--- process ---"
-          Z3_PID=$(cat "${{ runner.temp }}/z3.pid" 2>/dev/null || true)
-          if [ -n "$Z3_PID" ]; then
-            ps -p "$Z3_PID" -o pid,stat,cmd 2>&1 || true
-          fi
-          echo "--- port ---"
-          ss -tlnp 2>/dev/null | grep 9000 || true
-          echo "--- stderr ---"
-          cat /tmp/z3.stderr 2>/dev/null || true
-          echo "--- stdout ---"
-          cat /tmp/z3.stdout 2>/dev/null || true
           exit 1
 
       - name: Run test_client.py
@@ -211,9 +151,8 @@ jobs:
           echo "All test suites passed"
 
       - name: Stop z3 server
-        if: always() && (runner.os == 'Linux' || runner.os == 'macOS')
-        shell: bash
+        if: always()
         run: |
-          if [ -f "${{ runner.temp }}/z3.pid" ]; then
-            kill "$(cat "${{ runner.temp }}/z3.pid")" 2>/dev/null || true
+          if [ -f ${{ runner.temp }}/z3.pid ]; then
+            kill $(cat ${{ runner.temp }}/z3.pid) 2>/dev/null || true
           fi
