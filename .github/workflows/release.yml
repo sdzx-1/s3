@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-musl
+            zig_arch: x86_64
+            zig_os: linux
+            artifact_suffix: linux-x86_64
+          - os: macos-latest
+            target: aarch64-macos
+            zig_arch: aarch64
+            zig_os: macos
+            artifact_suffix: macos-aarch64
+    name: Build ${{ matrix.artifact_suffix }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Zig URL
+        id: zig-resolve
+        run: |
+          VERSION="0.16.0"
+          ARCH="${{ matrix.zig_arch }}"
+          OS="${{ matrix.zig_os }}"
+
+          curl -sL https://ziglang.org/download/index.json > /tmp/zig-index.json
+
+          URL=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".tarball // empty' /tmp/zig-index.json)
+          SHA=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".shasum // empty' /tmp/zig-index.json)
+
+          if [ -z "$URL" ]; then
+            echo "::error::Zig $VERSION not found in index.json"
+            exit 1
+          fi
+
+          echo "url=$URL"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Zig
+        id: cache-zig
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.local/share/zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-0.16.0
+          save-always: true
+
+      - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          ZIG_URL="${{ steps.zig-resolve.outputs.url }}"
+          EXPECTED_SHA="${{ steps.zig-resolve.outputs.sha256 }}"
+          ZIG_ROOT="$HOME/.local/share/zig"
+          TARBALL="/tmp/zig.tar.xz"
+
+          curl -fsSL "$ZIG_URL" -o "$TARBALL"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+          elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          else
+            echo "::error::No SHA-256 tool found"
+            exit 1
+          fi
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::SHA-256 mismatch"
+            exit 1
+          fi
+
+          mkdir -p "$ZIG_ROOT"
+          tar -xf "$TARBALL" -C "$ZIG_ROOT" --strip-components=1
+          rm -f "$TARBALL"
+
+      - name: Add Zig to PATH
+        run: echo "$HOME/.local/share/zig" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: Package
+        run: |
+          TAG="${{ github.ref_name }}"
+          SUFFIX="${{ matrix.artifact_suffix }}"
+          ARCHIVE="z3-${TAG}-${SUFFIX}.tar.gz"
+
+          tar czf "$ARCHIVE" -C zig-out/bin z3
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+        id: package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: z3-${{ matrix.artifact_suffix }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} dist/ \;
+          echo "::group::Release assets"
+          ls -lh dist/
+          echo "::endgroup::"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
