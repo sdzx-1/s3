@@ -62,6 +62,7 @@ jobs:
         with:
           path: ~/.local/share/zig
           key: zig-${{ runner.os }}-${{ runner.arch }}-0.16.0
+          save-always: true
 
       - name: Install Zig
         if: steps.cache-zig.outputs.cache-hit != 'true'
