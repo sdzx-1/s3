@@ -1378,7 +1378,8 @@ pub fn handleAbortMultipart(io: Io, data_dir: []const u8, allocator: Allocator, 
     defer allocator.free(parts_dir);
 
     Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        sendError(res, 500, "AbortMultipartCleanupFailed", "");
+        const error_resp = allocPrint(allocator, "AbortMultipartCleanupFailed: {t}", .{err});
+        sendError(res, 500, error_resp, "");
         return err;
     };
 
