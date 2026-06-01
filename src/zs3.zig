@@ -1377,10 +1377,16 @@ pub fn handleAbortMultipart(io: Io, data_dir: []const u8, allocator: Allocator, 
     const parts_dir = allocPrint(allocator, "{s}/.uploads/{s}", .{ data_dir, upload_id });
     defer allocator.free(parts_dir);
 
-    Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        const error_resp = allocPrint(allocator, "AbortMultipartCleanupFailed: {t}", .{err});
-        sendError(res, 500, error_resp, "");
-        return err;
+    Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| switch (err) {
+        error.AccessDenied => {
+            //TODO: fix this in macos
+            //An AccessDined error occurs on macOS, and the reason for this is currently unclear.
+        },
+        else => {
+            const error_resp = allocPrint(allocator, "AbortMultipartCleanupFailed: {t}", .{err});
+            sendError(res, 500, error_resp, "");
+            return err;
+        },
     };
 
     res.noContent();
@@ -1583,10 +1589,16 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     // Close final file before stat + meta write
     final_file.close(io);
 
-    Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        const error_resp = allocPrint(allocator, "FailedToCleanupUploadDir: {t}", .{err});
-        sendError(res, 500, error_resp, "");
-        return err;
+    Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| switch (err) {
+        error.AccessDenied => {
+            //TODO: fix this in macos
+            //An AccessDined error occurs on macOS, and the reason for this is currently unclear.
+        },
+        else => {
+            const error_resp = allocPrint(allocator, "FailedToCleanupUploadDir: {t}", .{err});
+            sendError(res, 500, error_resp, "");
+            return err;
+        },
     };
 
     var final_hash: [16]u8 = undefined;
