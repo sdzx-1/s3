@@ -1584,7 +1584,8 @@ pub fn handleCompleteMultipart(io: Io, data_dir: []const u8, allocator: Allocato
     final_file.close(io);
 
     Io.Dir.cwd().deleteTree(io, parts_dir) catch |err| {
-        sendError(res, 500, "FailedToCleanupUploadDir", "");
+        const error_resp = allocPrint(allocator, "FailedToCleanupUploadDir: {t}", .{err});
+        sendError(res, 500, error_resp, "");
         return err;
     };
 
