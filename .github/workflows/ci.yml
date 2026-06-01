@@ -29,12 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read required Zig version
+      - name: Set Zig version
         id: zig
-        run: |
-          ver=$(sed -n -E 's/^\s*\.?minimum_zig_version\s*=\s*"([^"]+)".*/\1/p' build.zig.zon)
-          echo "required=$ver" >> "$GITHUB_OUTPUT"
-          echo "Required Zig: $ver"
+        run: echo "required=0.16.0" >> "$GITHUB_OUTPUT"
 
       - name: Resolve Zig URL
         id: zig-resolve
