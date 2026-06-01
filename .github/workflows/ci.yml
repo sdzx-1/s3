@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main, master]
 
-# Only test the latest commit for non-main refs (same pattern as ghostty)
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -16,40 +15,56 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [epoll, io_uring]
-    name: build-and-test (${{ matrix.backend }})
-    runs-on: ubuntu-latest
+        include:
+          - os: ubuntu-latest
+            backend: epoll
+          - os: ubuntu-latest
+            backend: io_uring
+          - os: macos-latest
+            backend: kqueue
+          - os: windows-latest
+            backend: iocp
+    name: ${{ matrix.os }} / ${{ matrix.backend }}
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Read the required Zig version from build.zig.zon (same approach as ghostty's "test" job)
       - name: Read required Zig version
         id: zig
         run: |
           ver=$(sed -n -E 's/^\s*\.?minimum_zig_version\s*=\s*"([^"]+)".*/\1/p' build.zig.zon)
-          echo "required=$ver" >> $GITHUB_OUTPUT
-          echo "Required Zig version from build.zig.zon: $ver"
+          echo "required=$ver" >> "$GITHUB_OUTPUT"
+          echo "Required Zig: $ver"
 
-      # Download index.json and try to resolve the required version.
-      # Falls back to master when the declared version is not yet in index.json.
       - name: Resolve Zig URL
         id: zig-resolve
+        shell: bash
         run: |
           VERSION="${{ steps.zig.outputs.required }}"
-          ARCH="x86_64"
-          OS="linux"
+
+          # Map runner arch / OS to ziglang.org index.json keys
+          case "${{ runner.arch }}" in
+            X64)   ZIG_ARCH="x86_64" ;;
+            ARM64) ZIG_ARCH="aarch64" ;;
+          esac
+          case "${{ runner.os }}" in
+            Linux)   ZIG_OS="linux";   ZIG_EXT="tar.xz" ;;
+            macOS)   ZIG_OS="macos";   ZIG_EXT="tar.xz" ;;
+            Windows) ZIG_OS="windows"; ZIG_EXT="zip" ;;
+          esac
+          ZIG_KEY="${ZIG_ARCH}-${ZIG_OS}"
 
           curl -sL https://ziglang.org/download/index.json > /tmp/zig-index.json
 
-          URL=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".tarball // empty' /tmp/zig-index.json)
-          SHA=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".shasum // empty' /tmp/zig-index.json)
+          URL=$(jq -r --arg v "$VERSION" --arg k "$ZIG_KEY" '.[$v][$k].tarball // empty' /tmp/zig-index.json)
+          SHA=$(jq -r --arg v "$VERSION" --arg k "$ZIG_KEY" '.[$v][$k].shasum // empty' /tmp/zig-index.json)
 
           if [ -z "$URL" ]; then
             echo "::notice::Zig $VERSION not in index.json — falling back to master"
-            URL=$(jq -r '.master."x86_64-linux".tarball' /tmp/zig-index.json)
-            SHA=$(jq -r '.master."x86_64-linux".shasum' /tmp/zig-index.json)
+            URL=$(jq -r --arg k "$ZIG_KEY" '.master[$k].tarball' /tmp/zig-index.json)
+            SHA=$(jq -r --arg k "$ZIG_KEY" '.master[$k].shasum' /tmp/zig-index.json)
             RESOLVED_VER=$(jq -r '.master.version' /tmp/zig-index.json)
           else
             RESOLVED_VER="$VERSION"
@@ -58,6 +73,7 @@ jobs:
           echo "url=$URL"               >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA"            >> "$GITHUB_OUTPUT"
           echo "resolved=$RESOLVED_VER" >> "$GITHUB_OUTPUT"
+          echo "ext=$ZIG_EXT"           >> "$GITHUB_OUTPUT"
           echo "Installing Zig $RESOLVED_VER from $URL"
 
       - name: Cache Zig
@@ -69,27 +85,40 @@ jobs:
 
       - name: Install Zig
         if: steps.cache-zig.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -eu
-          ZIG_URL="${{ steps.zig-resolve.outputs.url }}"
+          URL="${{ steps.zig-resolve.outputs.url }}"
           EXPECTED_SHA="${{ steps.zig-resolve.outputs.sha256 }}"
+          EXT="${{ steps.zig-resolve.outputs.ext }}"
           ZIG_ROOT="$HOME/.local/share/zig"
-          TARBALL="/tmp/zig.tar.xz"
+          DOWNLOAD="${{ runner.temp }}/zig-download"
 
-          curl -fsSL "$ZIG_URL" -o "$TARBALL"
+          curl -fsSL "$URL" -o "$DOWNLOAD"
 
-          ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+          ACTUAL_SHA=$(sha256sum "$DOWNLOAD" | cut -d' ' -f1)
           if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo "::error::SHA-256 mismatch — expected $EXPECTED_SHA, got $ACTUAL_SHA"
+            echo "::error::SHA-256 mismatch"
             exit 1
           fi
           echo "SHA-256 OK"
 
           mkdir -p "$ZIG_ROOT"
-          tar -xf "$TARBALL" -C "$ZIG_ROOT" --strip-components=1
-          rm -f "$TARBALL"
+          case "$EXT" in
+            zip)
+              mkdir -p /tmp/zig-extract
+              unzip -q "$DOWNLOAD" -d /tmp/zig-extract
+              mv /tmp/zig-extract/*/* "$ZIG_ROOT"/
+              rm -rf /tmp/zig-extract
+              ;;
+            *)
+              tar -xf "$DOWNLOAD" -C "$ZIG_ROOT" --strip-components=1
+              ;;
+          esac
+          rm -f "$DOWNLOAD"
 
       - name: Add Zig to PATH
+        shell: bash
         run: echo "$HOME/.local/share/zig" >> "$GITHUB_PATH"
 
       - name: Setup Python
@@ -104,23 +133,36 @@ jobs:
         run: zig build -Doptimize=ReleaseFast -Dbackend=${{ matrix.backend }}
 
       - name: Create data and tmp directories
+        shell: bash
         run: mkdir -p data tmp
 
       - name: Start z3 server
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        shell: bash
         run: |
           ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp &
-          echo $! > ${{ runner.temp }}/z3.pid
+          echo $! > "${{ runner.temp }}/z3.pid"
+
+      - name: Start z3 server (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -NoNewWindow -PassThru `
+            -FilePath ./zig-out/bin/z3.exe `
+            -ArgumentList '--port=9000','--data-dir=./data','--tmp=./tmp'
+          $proc.Id | Out-File -FilePath "$env:RUNNER_TEMP/z3.pid"
 
       - name: Wait for server
+        shell: bash
         run: |
           for i in $(seq 1 30); do
             if curl -sf -o /dev/null -w '%{http_code}' http://localhost:9000/ 2>/dev/null | grep -q '200\|403'; then
-              echo "Server is ready (attempt $i)"
+              echo "Server ready (attempt $i)"
               exit 0
             fi
             sleep 1
           done
-          echo "Server failed to start"
+          echo "::error::Server failed to start"
           exit 1
 
       - name: Run test_client.py
@@ -167,8 +209,18 @@ jobs:
           echo "All test suites passed"
 
       - name: Stop z3 server
-        if: always()
+        if: always() && (runner.os == 'Linux' || runner.os == 'macOS')
+        shell: bash
         run: |
-          if [ -f ${{ runner.temp }}/z3.pid ]; then
-            kill $(cat ${{ runner.temp }}/z3.pid) 2>/dev/null || true
+          if [ -f "${{ runner.temp }}/z3.pid" ]; then
+            kill "$(cat "${{ runner.temp }}/z3.pid")" 2>/dev/null || true
           fi
+
+      - name: Stop z3 server (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pidFile = "$env:RUNNER_TEMP/z3.pid"
+          if (Test-Path $pidFile) {
+            Stop-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
+          }
