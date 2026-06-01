@@ -13,6 +13,11 @@ concurrency:
 
 jobs:
   build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [epoll, io_uring]
+    name: build-and-test (${{ matrix.backend }})
     runs-on: ubuntu-latest
 
     steps:
@@ -96,7 +101,7 @@ jobs:
         run: pip install boto3 botocore
 
       - name: Build z3
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dbackend=${{ matrix.backend }}
 
       - name: Create data and tmp directories
         run: mkdir -p data tmp
