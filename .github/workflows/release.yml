@@ -17,11 +17,19 @@ jobs:
             target: x86_64-linux-musl
             zig_arch: x86_64
             zig_os: linux
-            artifact_suffix: linux-x86_64
+            backend: io_uring
+            artifact_suffix: linux-x86_64-io_uring
+          - os: ubuntu-latest
+            target: x86_64-linux-musl
+            zig_arch: x86_64
+            zig_os: linux
+            backend: epoll
+            artifact_suffix: linux-x86_64-epoll
           - os: macos-latest
             target: aarch64-macos
             zig_arch: aarch64
             zig_os: macos
+            backend: kqueue
             artifact_suffix: macos-aarch64
     name: Build ${{ matrix.artifact_suffix }}
     runs-on: ${{ matrix.os }}
@@ -91,7 +99,7 @@ jobs:
 
       - name: Build
         run: |
-          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -Dbackend=${{ matrix.backend }}
 
       - name: Package
         run: |
