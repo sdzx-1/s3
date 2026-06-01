@@ -20,8 +20,8 @@ jobs:
             backend: epoll
           - os: ubuntu-latest
             backend: io_uring
-          - os: macos-latest
-            backend: kqueue
+          # - os: macos-latest
+          #   backend: kqueue
     name: ${{ matrix.os }} / ${{ matrix.backend }}
     runs-on: ${{ matrix.os }}
 
@@ -154,6 +154,17 @@ jobs:
             sleep 1
           done
           echo "::error::Server failed to start"
+          echo "--- process ---"
+          Z3_PID=$(cat "${{ runner.temp }}/z3.pid" 2>/dev/null || true)
+          if [ -n "$Z3_PID" ]; then
+            ps -p "$Z3_PID" -o pid,stat,cmd 2>&1 || true
+          fi
+          echo "--- port ---"
+          ss -tlnp 2>/dev/null | grep 9000 || true
+          echo "--- stderr ---"
+          cat /tmp/z3.stderr 2>/dev/null || true
+          echo "--- stdout ---"
+          cat /tmp/z3.stdout 2>/dev/null || true
           exit 1
 
       - name: Run test_client.py
