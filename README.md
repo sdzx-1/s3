@@ -29,7 +29,7 @@ Server listens on port 9000, stores data in `./data`. Default credentials are
 
 ### Credentials & roles
 
-Provide credentials at build time (`-Dacl-list=`) or runtime (`--acl=`):
+Provide credentials at runtime (`--acl=`):
 
 ```bash
 ./zig-out/bin/z3 --acl="admin:akey:asec,reader:rkey:rsec,writer:wkey:wsec"

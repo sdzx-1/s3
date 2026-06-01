@@ -9,7 +9,7 @@ const zs3 = @import("zs3.zig");
 const http = std.http;
 
 pub const MsgWrapper = struct {
-    id: *ClientContext, // cast form client's WaitMsg address
+    id: *ClientContext,
     msg: Msg,
 };
 
@@ -29,7 +29,7 @@ pub const MsgUnion = union {
             void => {},
             *Metrics => self.metrics,
             Api => self.api,
-            else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
+            inline else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
 
@@ -38,7 +38,7 @@ pub const MsgUnion = union {
             void => .{ .void = {} },
             *Metrics => .{ .metrics = val },
             Api => .{ .api = val },
-            else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
+            inline else => @compileError("Not support type: " ++ std.fmt.comptimePrint("{any}", .{T})),
         };
     }
 };
