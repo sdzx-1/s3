@@ -15,9 +15,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [epoll, io_uring]
-    name: build-and-test (${{ matrix.backend }})
-    runs-on: ubuntu-latest
+        include:
+          - os: ubuntu-latest
+            backend: epoll
+            zig_arch: x86_64
+            zig_os: linux
+          - os: ubuntu-latest
+            backend: io_uring
+            zig_arch: x86_64
+            zig_os: linux
+          - os: macos-latest
+            backend: kqueue
+            zig_arch: aarch64
+            zig_os: macos
+    name: ${{ matrix.os }} / ${{ matrix.backend }}
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -27,8 +39,8 @@ jobs:
         id: zig-resolve
         run: |
           VERSION="0.16.0"
-          ARCH="x86_64"
-          OS="linux"
+          ARCH="${{ matrix.zig_arch }}"
+          OS="${{ matrix.zig_os }}"
 
           curl -sL https://ziglang.org/download/index.json > /tmp/zig-index.json
 
@@ -62,7 +74,14 @@ jobs:
 
           curl -fsSL "$ZIG_URL" -o "$TARBALL"
 
-          ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+          if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+          elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          else
+            echo "::error::No SHA-256 tool found"
+            exit 1
+          fi
           if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
             echo "::error::SHA-256 mismatch"
             exit 1
