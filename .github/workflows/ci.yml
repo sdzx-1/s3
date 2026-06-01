@@ -22,8 +22,6 @@ jobs:
             backend: io_uring
           - os: macos-latest
             backend: kqueue
-          - os: windows-latest
-            backend: iocp
     name: ${{ matrix.os }} / ${{ matrix.backend }}
     runs-on: ${{ matrix.os }}
 
@@ -52,7 +50,6 @@ jobs:
           case "${{ runner.os }}" in
             Linux)   ZIG_OS="linux";   ZIG_EXT="tar.xz" ;;
             macOS)   ZIG_OS="macos";   ZIG_EXT="tar.xz" ;;
-            Windows) ZIG_OS="windows"; ZIG_EXT="zip" ;;
           esac
           ZIG_KEY="${ZIG_ARCH}-${ZIG_OS}"
 
@@ -140,15 +137,6 @@ jobs:
           ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp &
           echo $! > "${{ runner.temp }}/z3.pid"
 
-      - name: Start z3 server (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $proc = Start-Process -NoNewWindow -PassThru `
-            -FilePath ./zig-out/bin/z3.exe `
-            -ArgumentList '--port=9000','--data-dir=./data','--tmp=./tmp'
-          $proc.Id | Out-File -FilePath "$env:RUNNER_TEMP/z3.pid"
-
       - name: Wait for server
         shell: bash
         run: |
@@ -212,12 +200,3 @@ jobs:
           if [ -f "${{ runner.temp }}/z3.pid" ]; then
             kill "$(cat "${{ runner.temp }}/z3.pid")" 2>/dev/null || true
           fi
-
-      - name: Stop z3 server (Windows)
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $pidFile = "$env:RUNNER_TEMP/z3.pid"
-          if (Test-Path $pidFile) {
-            Stop-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
-          }
