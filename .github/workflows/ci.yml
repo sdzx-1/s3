@@ -125,14 +125,23 @@ jobs:
 
       - name: Create data and tmp directories
         shell: bash
-        run: mkdir -p data tmp
+        run: mkdir -p data tmp log
 
       - name: Start z3 server
         if: runner.os == 'Linux' || runner.os == 'macOS'
         shell: bash
         run: |
-          ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp &
-          echo $! > "${{ runner.temp }}/z3.pid"
+          ./zig-out/bin/z3 --port=9000 --data-dir=./data --tmp=./tmp > /tmp/z3.stdout 2> /tmp/z3.stderr &
+          Z3_PID=$!
+          echo "$Z3_PID" > "${{ runner.temp }}/z3.pid"
+          sleep 2
+          if ! kill -0 "$Z3_PID" 2>/dev/null; then
+            echo "::error::z3 exited immediately (PID $Z3_PID)"
+            echo "--- stdout ---"; cat /tmp/z3.stdout
+            echo "--- stderr ---"; cat /tmp/z3.stderr
+            exit 1
+          fi
+          echo "z3 running (PID $Z3_PID)"
 
       - name: Wait for server
         shell: bash
